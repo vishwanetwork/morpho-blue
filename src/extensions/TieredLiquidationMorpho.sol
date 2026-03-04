@@ -12,6 +12,7 @@ import {ORACLE_PRICE_SCALE, LIQUIDATION_CURSOR, MAX_LIQUIDATION_INCENTIVE_FACTOR
 import {UtilsLib} from "../libraries/UtilsLib.sol";
 import {MarketParamsLib} from "../libraries/MarketParamsLib.sol";
 import {SafeTransferLib} from "../libraries/SafeTransferLib.sol";
+import {MorphoBalancesLib} from "../libraries/periphery/MorphoBalancesLib.sol";
 
 import {WhitelistRegistry} from "./WhitelistRegistry.sol";
 import {HealthFactorLib} from "./libraries/HealthFactorLib.sol";
@@ -23,6 +24,7 @@ contract TieredLiquidationMorpho {
     using SharesMathLib for uint256;
     using SafeTransferLib for IERC20;
     using MarketParamsLib for MarketParams;
+    using MorphoBalancesLib for IMorpho;
 
     /* ── Errors ────────────────────────────────────────────── */
 
@@ -222,8 +224,8 @@ contract TieredLiquidationMorpho {
             uint256 quoted = seizedAssets.mulDivUp(pd.collateralPrice, ORACLE_PRICE_SCALE);
             estimatedRepay = quoted.wDivUp(pd.liquidationIncentiveFactor) * 12 / 10;
         } else if (repaidShares > 0) {
-            Market memory m = MORPHO.market(marketId);
-            uint256 repaidAmt = repaidShares.toAssetsUp(m.totalBorrowAssets, m.totalBorrowShares);
+            (,, uint256 totalBorrowAssets, uint256 totalBorrowShares) = MORPHO.expectedMarketBalances(marketParams);
+            uint256 repaidAmt = repaidShares.toAssetsUp(totalBorrowAssets, totalBorrowShares);
             (, uint256 maxRepay) = HealthFactorLib.calculateLiquidationLimits(
                 pos.collateral, pd.borrowed, config.maxLiquidationRatio
             );
@@ -311,10 +313,9 @@ contract TieredLiquidationMorpho {
         uint256 depositToRefund = uint256(request.depositAmount);
 
         // Validate current position
-        Market memory marketData = MORPHO.market(marketId);
         Position memory pos = MORPHO.position(marketId, borrower);
         uint256 collateralPrice = IOracle(marketParams.oracle).price();
-        uint256 borrowed = uint256(pos.borrowShares).toAssetsUp(marketData.totalBorrowAssets, marketData.totalBorrowShares);
+        uint256 borrowed = MORPHO.expectedBorrowAssets(marketParams, borrower);
         if (HealthFactorLib.calculateHealthFactor(pos.collateral, collateralPrice, borrowed, marketParams.lltv) >= WAD) {
             revert HealthyPosition();
         }
@@ -370,9 +371,8 @@ contract TieredLiquidationMorpho {
 
     function getHealthFactor(MarketParams calldata marketParams, address borrower) external view returns (uint256) {
         Id marketId = marketParams.id();
-        Market memory m = MORPHO.market(marketId);
         Position memory pos = MORPHO.position(marketId, borrower);
-        uint256 borrowed = uint256(pos.borrowShares).toAssetsUp(m.totalBorrowAssets, m.totalBorrowShares);
+        uint256 borrowed = MORPHO.expectedBorrowAssets(marketParams, borrower);
         return HealthFactorLib.calculateHealthFactor(pos.collateral, IOracle(marketParams.oracle).price(), borrowed, marketParams.lltv);
     }
 
@@ -402,10 +402,9 @@ contract TieredLiquidationMorpho {
     function _loadAndValidatePosition(
         MarketParams calldata marketParams, Id marketId, address borrower, MarketConfig memory config
     ) internal view returns (PositionData memory pd) {
-        Market memory m = MORPHO.market(marketId);
         Position memory pos = MORPHO.position(marketId, borrower);
         pd.collateralPrice = IOracle(marketParams.oracle).price();
-        pd.borrowed = uint256(pos.borrowShares).toAssetsUp(m.totalBorrowAssets, m.totalBorrowShares);
+        pd.borrowed = MORPHO.expectedBorrowAssets(marketParams, borrower);
         pd.healthFactor = HealthFactorLib.calculateHealthFactor(pos.collateral, pd.collateralPrice, pd.borrowed, marketParams.lltv);
         if (pd.healthFactor >= WAD) revert HealthyPosition();
         uint256 lastTime = lastLiquidationTime[marketId][borrower];
