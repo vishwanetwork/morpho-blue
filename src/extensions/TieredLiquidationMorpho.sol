@@ -8,7 +8,8 @@ import {IERC20} from "../interfaces/IERC20.sol";
 
 import {MathLib, WAD} from "../libraries/MathLib.sol";
 import {SharesMathLib} from "../libraries/SharesMathLib.sol";
-import {ORACLE_PRICE_SCALE} from "../libraries/ConstantsLib.sol";
+import {ORACLE_PRICE_SCALE, LIQUIDATION_CURSOR, MAX_LIQUIDATION_INCENTIVE_FACTOR} from "../libraries/ConstantsLib.sol";
+import {UtilsLib} from "../libraries/UtilsLib.sol";
 import {MarketParamsLib} from "../libraries/MarketParamsLib.sol";
 import {SafeTransferLib} from "../libraries/SafeTransferLib.sol";
 
@@ -48,7 +49,6 @@ contract TieredLiquidationMorpho {
     error InsufficientCollateral();
     error AtLeastOneModeRequired();
     error LockDurationRequired();
-    error BonusTooHigh();
     error RatioExceeds100();
     error ProtocolFeeTooHigh();
     error InvalidLiquidationStatus();
@@ -83,7 +83,6 @@ contract TieredLiquidationMorpho {
         bool enabled;
         bool publicLiquidationEnabled;
         bool twoStepLiquidationEnabled;
-        uint256 liquidationBonus;
         uint256 maxLiquidationRatio;
         uint256 cooldownPeriod;
         uint256 minSeizedAssets;
@@ -159,7 +158,6 @@ contract TieredLiquidationMorpho {
     function configureMarket(
         Id marketId,
         bool enabled,
-        uint256 liquidationBonus,
         uint256 maxLiquidationRatio,
         uint256 cooldownPeriod,
         uint256 minSeizedAssets,
@@ -169,7 +167,6 @@ contract TieredLiquidationMorpho {
         uint256 requestDeposit,
         uint256 protocolFee
     ) external onlyOwner {
-        if (liquidationBonus > 0.2e18) revert BonusTooHigh();
         if (maxLiquidationRatio > WAD) revert RatioExceeds100();
         if (protocolFee > WAD) revert ProtocolFeeTooHigh();
         if (enabled && !publicLiquidationEnabled && !twoStepLiquidationEnabled) revert AtLeastOneModeRequired();
@@ -179,7 +176,6 @@ contract TieredLiquidationMorpho {
             enabled: enabled,
             publicLiquidationEnabled: publicLiquidationEnabled,
             twoStepLiquidationEnabled: twoStepLiquidationEnabled,
-            liquidationBonus: liquidationBonus,
             maxLiquidationRatio: maxLiquidationRatio,
             cooldownPeriod: cooldownPeriod,
             minSeizedAssets: minSeizedAssets,
@@ -245,7 +241,7 @@ contract TieredLiquidationMorpho {
             marketParams, borrower, seizedAssetsToPass, repaidSharesToPass, estimatedRepay, data
         );
 
-        actualSeizedAssets = _deductProtocolFee(marketId, actualSeizedAssets, config);
+        actualSeizedAssets = _deductProtocolFee(marketId, actualSeizedAssets, config, pd.liquidationIncentiveFactor);
         if (actualSeizedAssets > 0) IERC20(marketParams.collateralToken).safeTransfer(msg.sender, actualSeizedAssets);
 
         lastLiquidationTime[marketId][borrower] = block.timestamp;
@@ -323,7 +319,7 @@ contract TieredLiquidationMorpho {
             revert HealthyPosition();
         }
 
-        uint256 lif = WAD + config.liquidationBonus;
+        uint256 lif = _calculateLiquidationIncentiveFactor(marketParams.lltv);
         uint256 debtToRepay = borrowed.mulDivDown(storedRatio, WAD);
         uint256 totalSeized = debtToRepay.mulDivUp(lif, WAD).mulDivUp(ORACLE_PRICE_SCALE, collateralPrice);
         if (totalSeized > pos.collateral) revert InsufficientCollateral();
@@ -332,7 +328,7 @@ contract TieredLiquidationMorpho {
             marketParams, borrower, totalSeized, 0, debtToRepay * 12 / 10, data
         );
 
-        uint256 liquidatorShare = _deductProtocolFee(marketId, actualSeizedAssets, config);
+        uint256 liquidatorShare = _deductProtocolFee(marketId, actualSeizedAssets, config, lif);
         if (liquidatorShare > 0) IERC20(marketParams.collateralToken).safeTransfer(msg.sender, liquidatorShare);
 
         request.status = LiquidationStatus.Completed;
@@ -391,6 +387,18 @@ contract TieredLiquidationMorpho {
 
     /* ── Internal Helpers ──────────────────────────────────── */
 
+    /// calculate liquidation incentive factor matching Morpho's formula
+    function _calculateLiquidationIncentiveFactor(uint256 lltv) internal pure returns (uint256) {
+        return UtilsLib.min(
+            MAX_LIQUIDATION_INCENTIVE_FACTOR,
+            WAD.wDivDown(
+                WAD - LIQUIDATION_CURSOR.wMulDown(
+                    WAD - lltv
+                )
+            )
+        );
+    }
+
     function _loadAndValidatePosition(
         MarketParams calldata marketParams, Id marketId, address borrower, MarketConfig memory config
     ) internal view returns (PositionData memory pd) {
@@ -404,7 +412,7 @@ contract TieredLiquidationMorpho {
         if (config.cooldownPeriod > 0 && lastTime > 0 && block.timestamp < lastTime + config.cooldownPeriod) {
             revert CooldownNotElapsed();
         }
-        pd.liquidationIncentiveFactor = WAD + config.liquidationBonus;
+        pd.liquidationIncentiveFactor = _calculateLiquidationIncentiveFactor(marketParams.lltv);
     }
 
     function _enforceNoActiveLock(Id marketId, address borrower, uint256 lockDuration) internal {
@@ -441,12 +449,11 @@ contract TieredLiquidationMorpho {
     }
 
     /// @dev Checked arithmetic for fee subtraction (fixes V-03)
-    function _deductProtocolFee(Id marketId, uint256 seizedAssets, MarketConfig memory config)
+    function _deductProtocolFee(Id marketId, uint256 seizedAssets, MarketConfig memory config, uint256 lif)
         internal returns (uint256)
     {
         if (config.protocolFee == 0) return seizedAssets;
-        uint256 lif = WAD + config.liquidationBonus;
-        uint256 totalBonus = seizedAssets.mulDivDown(config.liquidationBonus, lif);
+        uint256 totalBonus = seizedAssets - seizedAssets.wDivUp(lif);
         uint256 feeAmount = totalBonus.mulDivDown(config.protocolFee, WAD);
         require(feeAmount <= seizedAssets, "fee exceeds seized");
         accumulatedFees[marketId] += feeAmount;
