@@ -549,7 +549,9 @@ contract TieredLiquidationMorpho {
     ) external nonReentrant returns (uint256 actualSeizedAssets, uint256 actualRepaidAssets) {
         Id marketId = marketParams.id();
         MarketConfig memory config = marketConfigs[marketId];
-        
+
+        if (!config.enabled) revert MarketNotConfigured();
+
         LiquidationRequest storage request = liquidationRequests[marketId][borrower];
 
         if (request.status != LiquidationStatus.Pending) {
