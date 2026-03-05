@@ -796,10 +796,12 @@ contract TieredLiquidationMorpho {
 
     /// @notice Approve exact token amount, USDT-safe (reset to 0 first)
     function _approveToken(address token, address spender, uint256 amount) internal {
-        (bool s0,) = token.call(abi.encodeWithSignature("approve(address,uint256)", spender, uint256(0)));
+        (bool s0, bytes memory r0) = token.call(abi.encodeWithSignature("approve(address,uint256)", spender, uint256(0)));
+        s0 = s0 && (r0.length == 0 || abi.decode(r0, (bool)));
         if (!s0) revert ApproveFailed();
         if (amount > 0) {
-            (bool s1,) = token.call(abi.encodeWithSignature("approve(address,uint256)", spender, amount));
+            (bool s1, bytes memory r1) = token.call(abi.encodeWithSignature("approve(address,uint256)", spender, amount));
+            s1 = s1 && (r1.length == 0 || abi.decode(r1, (bool)));
             if (!s1) revert ApproveFailed();
         }
     }
