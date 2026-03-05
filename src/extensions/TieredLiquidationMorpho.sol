@@ -16,6 +16,7 @@ import {SafeTransferLib} from "../libraries/SafeTransferLib.sol";
 import {WhitelistRegistry} from "./WhitelistRegistry.sol";
 import {HealthFactorLib} from "./libraries/HealthFactorLib.sol";
 import {PriceOracleLib} from "./libraries/PriceOracleLib.sol";
+import {MorphoBalancesLib} from "../libraries/periphery/MorphoBalancesLib.sol";
 
 /// @title TieredLiquidationMorpho
 /// @notice Enhanced Morpho protocol with flexible liquidation mechanism
@@ -26,6 +27,7 @@ contract TieredLiquidationMorpho {
     using SharesMathLib for uint256;
     using SafeTransferLib for IERC20;
     using MarketParamsLib for MarketParams;
+    using MorphoBalancesLib for IMorpho;
 
     /* ERRORS */
 
@@ -295,11 +297,12 @@ contract TieredLiquidationMorpho {
             }
         }
 
-        // Get position data
+        // Accrue interest so that market data reflects pending interest
+        MORPHO.accrueInterest(marketParams);
+
         Market memory marketData = MORPHO.market(marketId);
         Position memory pos = MORPHO.position(marketId, borrower);
 
-        // Calculate health factor
         uint256 collateralPrice = IOracle(marketParams.oracle).price();
         uint256 borrowed = uint256(pos.borrowShares).toAssetsUp(
             marketData.totalBorrowAssets,
@@ -456,7 +459,9 @@ contract TieredLiquidationMorpho {
             _clearExpiredRequest(marketId, borrower, existingRequest);
         }
 
-        // Get position and validate health
+        // Accrue interest so that market data reflects pending interest
+        MORPHO.accrueInterest(marketParams);
+
         Market memory marketData = MORPHO.market(marketId);
         Position memory pos = MORPHO.position(marketId, borrower);
 
@@ -554,7 +559,9 @@ contract TieredLiquidationMorpho {
         uint256 storedLiquidationRatio = uint256(request.liquidationRatio);
         uint256 depositToRefund = uint256(request.depositAmount);
 
-        // Get current position data
+        // Accrue interest so that market data reflects pending interest
+        MORPHO.accrueInterest(marketParams);
+
         Market memory marketData = MORPHO.market(marketId);
         Position memory pos = MORPHO.position(marketId, borrower);
 
@@ -695,20 +702,20 @@ contract TieredLiquidationMorpho {
 
     /* VIEW FUNCTIONS */
     
-    /// @notice Get health factor for a borrower
+    /// @notice Get health factor for a borrower (accounts for pending interest)
     function getHealthFactor(MarketParams calldata marketParams, address borrower)
         external
         view
         returns (uint256)
     {
         Id marketId = marketParams.id();
-        Market memory marketData = MORPHO.market(marketId);
         Position memory pos = MORPHO.position(marketId, borrower);
+
+        (,, uint256 totalBorrowAssets, uint256 totalBorrowShares) =
+            MORPHO.expectedMarketBalances(marketParams);
+
         uint256 collateralPrice = IOracle(marketParams.oracle).price();
-        uint256 borrowed = uint256(pos.borrowShares).toAssetsUp(
-            marketData.totalBorrowAssets,
-            marketData.totalBorrowShares
-        );
+        uint256 borrowed = uint256(pos.borrowShares).toAssetsUp(totalBorrowAssets, totalBorrowShares);
         return HealthFactorLib.calculateHealthFactor(
             pos.collateral,
             collateralPrice,
