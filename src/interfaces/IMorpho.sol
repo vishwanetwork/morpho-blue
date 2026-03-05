@@ -77,6 +77,10 @@ interface IMorphoBase {
     /// @notice The `authorizer`'s current nonce. Used to prevent replay attacks with EIP-712 signatures.
     function nonce(address authorizer) external view returns (uint256);
 
+    /// @notice The optional per-market liquidation extension in Morpho core.
+    /// @dev Returns address(0) when direct core liquidation is not restricted.
+    function liquidationExtension(Id id) external view returns (address);
+
     /// @notice Sets `newOwner` as `owner` of the contract.
     /// @dev Warning: No two-step transfer ownership.
     /// @dev Warning: The owner can be set to the zero address.

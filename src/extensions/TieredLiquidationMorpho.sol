@@ -57,6 +57,7 @@ contract TieredLiquidationMorpho {
     error BonusTooHigh();
     error RatioExceeds100();
     error ProtocolFeeTooHigh();
+    error MorphoLiquidationExtensionMismatch();
 
     /* EVENTS */
 
@@ -228,6 +229,7 @@ contract TieredLiquidationMorpho {
         
         if (enabled) {
             if (!publicLiquidationEnabled && !twoStepLiquidationEnabled) revert AtLeastOneModeRequired();
+            if (MORPHO.liquidationExtension(marketId) != address(this)) revert MorphoLiquidationExtensionMismatch();
         }
         
         if (twoStepLiquidationEnabled) {
