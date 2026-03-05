@@ -70,6 +70,7 @@ contract TieredLiquidationMorpho {
     error InsufficientCollateral();
     error AtLeastOneModeRequired();
     error LockDurationRequired();
+    error LockDurationTooLarge();
     error RatioExceeds100();
     error ProtocolFeeTooHigh();
     error MorphoLiquidationExtensionMismatch();
@@ -529,6 +530,7 @@ contract TieredLiquidationMorpho {
         unchecked {
             expiresAt = block.timestamp + config.lockDuration;
         }
+        if (expiresAt > type(uint64).max) revert LockDurationTooLarge();
 
         liquidationRequests[marketId][borrower] = LiquidationRequest({
             liquidator: msg.sender,

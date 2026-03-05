@@ -713,5 +713,37 @@ contract TwoStepLiquidationTest is BaseTest {
         assertGt(seized, 0, "Should seize collateral");
     }
 
+    function testRequestRevertsWhenExpiresAtExceedsUint64() public {
+        // Configure an extremely large lock duration that would overflow uint64 expiresAt.
+        tieredMorpho.configureMarket(
+            id,
+            true,
+            WAD,
+            0,
+            0,
+            true,
+            true,
+            true,
+            type(uint64).max,
+            REQUEST_DEPOSIT,
+            0.5e18
+        );
+
+        uint256 collateralAmount = 10 ether;
+        uint256 borrowAmount = 7 ether;
+
+        _setupBorrowerPosition(collateralAmount, borrowAmount);
+        oracle.setPrice(ORACLE_PRICE_SCALE * 85 / 100);
+
+        vm.deal(liquidator, 1 ether);
+        loanToken.setBalance(liquidator, 20 ether);
+
+        vm.startPrank(liquidator);
+        loanToken.approve(address(tieredMorpho), type(uint256).max);
+        vm.expectRevert(TieredLiquidationMorpho.LockDurationTooLarge.selector);
+        tieredMorpho.requestLiquidation{value: REQUEST_DEPOSIT}(marketParams, borrower, 0.5e18);
+        vm.stopPrank();
+    }
+
     receive() external payable {}
 }
