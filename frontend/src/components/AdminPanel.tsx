@@ -18,7 +18,6 @@ interface AdminPanelProps {
   onSetWhitelistMode: (marketId: string, enabled: boolean) => Promise<void>;
   onConfigureMarket: (marketId: string, config: {
     enabled: boolean;
-    liquidationBonus: bigint;
     maxLiquidationRatio: bigint;
     cooldownPeriod: bigint;
     minSeizedAssets: bigint;
@@ -55,7 +54,6 @@ export function AdminPanel({
     enabled: true,
     publicLiquidation: true,
     twoStepLiquidation: false,
-    liquidationBonus: '0.05',
     maxLiquidationRatio: '1',
     cooldownPeriod: '3600',
     minSeizedAssets: '0',
@@ -127,11 +125,6 @@ export function AdminPanel({
   const handleConfigureMarket = async () => {
     if (!selectedMarket) return;
 
-    const bonus = parseFloat(config.liquidationBonus);
-    if (isNaN(bonus) || bonus < 0 || bonus > 0.2) {
-      setError(t('admin.bonusError'));
-      return;
-    }
     const ratio = parseFloat(config.maxLiquidationRatio);
     if (isNaN(ratio) || ratio <= 0 || ratio > 1) {
       setError(t('admin.ratioError'));
@@ -144,7 +137,6 @@ export function AdminPanel({
     try {
       await onConfigureMarket(selectedMarket.id, {
         enabled: config.enabled,
-        liquidationBonus: parseUnits(config.liquidationBonus, 18),
         maxLiquidationRatio: parseUnits(config.maxLiquidationRatio, 18),
         cooldownPeriod: BigInt(config.cooldownPeriod),
         minSeizedAssets: parseUnits(config.minSeizedAssets, 18),
@@ -323,21 +315,6 @@ export function AdminPanel({
 
               <div>
                 <label className="block text-xs text-gray-400 mb-1">
-                  {t('admin.liquidationBonus')} <span className="text-yellow-400">{t('admin.liquidationBonusHint')}</span>
-                </label>
-                <input
-                  type="text"
-                  value={config.liquidationBonus}
-                  onChange={(e) => setConfig({ ...config, liquidationBonus: e.target.value })}
-                  placeholder="0.05"
-                  className={`w-full bg-gray-800 border rounded-lg px-4 py-2 ${
-                    parseFloat(config.liquidationBonus) > 0.2 ? 'border-red-500' : 'border-gray-600'
-                  }`}
-                />
-              </div>
-
-              <div>
-                <label className="block text-xs text-gray-400 mb-1">
                   {t('admin.maxLiquidationRatio')} <span className="text-gray-500">{t('admin.maxLiquidationRatioHint')}</span>
                 </label>
                 <input
@@ -362,7 +339,7 @@ export function AdminPanel({
 
               <button
                 onClick={handleConfigureMarket}
-                disabled={loading || !address || !selectedMarket || parseFloat(config.liquidationBonus) > 0.2}
+                disabled={loading || !address || !selectedMarket}
                 className="w-full bg-purple-500 hover:bg-purple-600 py-2 rounded-lg font-medium disabled:opacity-50"
               >
                 {loading ? t('admin.saving') : t('admin.saveConfig')}

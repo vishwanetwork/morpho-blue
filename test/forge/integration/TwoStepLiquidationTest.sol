@@ -36,10 +36,13 @@ contract TwoStepLiquidationTest is BaseTest {
         // - 10% liquidation bonus
         // - 1 hour lock duration for two-step
         // - 0.1 ETH deposit required for two-step
+        // 6.1 fix: register extension in Morpho core before configuring market
+        vm.prank(OWNER);
+        Morpho(address(morpho)).setLiquidationExtension(id, address(tieredMorpho));
+
         tieredMorpho.configureMarket(
             id,
             true,           // enabled
-            0.1e18,         // liquidationBonus (10%)
             WAD,            // maxLiquidationRatio (100%)
             0,              // cooldownPeriod (no cooldown)
             0,              // minSeizedAssets (no minimum)
@@ -107,7 +110,6 @@ contract TwoStepLiquidationTest is BaseTest {
         tieredMorpho.configureMarket(
             id,
             true,           // enabled
-            0.1e18,         // liquidationBonus
             WAD,            // maxLiquidationRatio
             0,              // cooldownPeriod
             0,              // minSeizedAssets

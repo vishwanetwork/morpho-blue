@@ -41,9 +41,9 @@ contract ConfigureTieredLiquidation is Script {
         console.log("Market initialized with admin:", marketAdmin);
 
         // 2. Configure market with hybrid mode support
+        // LIF is now derived from Morpho core formula (based on LLTV), no admin-configured bonus
         // Parameters:
         // - enabled: true
-        // - liquidationBonus: 10% (0.1e18)
         // - maxLiquidationRatio: 100% (1e18)
         // - cooldownPeriod: 1 hour
         // - minSeizedAssets: 0.01 ETH equivalent
@@ -55,7 +55,6 @@ contract ConfigureTieredLiquidation is Script {
         tieredMorpho.configureMarket(
             marketId,
             true,           // enabled
-            0.1e18,         // liquidationBonus (10%)
             1e18,           // maxLiquidationRatio (100%)
             1 hours,        // cooldownPeriod
             0.01 ether,     // minSeizedAssets
@@ -77,12 +76,11 @@ contract ConfigureTieredLiquidation is Script {
         console.log("Market ID:", uint256(Id.unwrap(marketId)));
         console.log("Market Admin:", marketAdmin);
         
-        // Check configuration (struct order: enabled, publicLiquidationEnabled, twoStepLiquidationEnabled, liquidationBonus, ...)
+        // Check configuration (struct order: enabled, publicLiquidationEnabled, twoStepLiquidationEnabled, ...)
         (
             bool enabled,
             bool publicLiquidationEnabled,
             bool twoStepLiquidationEnabled,
-            uint256 liquidationBonus,
             uint256 maxLiquidationRatio,
             uint256 cooldownPeriod,
             uint256 minSeizedAssets,
@@ -95,7 +93,6 @@ contract ConfigureTieredLiquidation is Script {
         console.log("Enabled:", enabled);
         console.log("Public Liquidation Enabled:", publicLiquidationEnabled);
         console.log("Two-Step Liquidation Enabled:", twoStepLiquidationEnabled);
-        console.log("Liquidation Bonus:", liquidationBonus);
         console.log("Max Liquidation Ratio:", maxLiquidationRatio);
         console.log("Cooldown Period:", cooldownPeriod);
         console.log("Min Seized Assets:", minSeizedAssets);
@@ -118,7 +115,6 @@ contract ConfigureTieredLiquidation is Script {
         tieredMorpho.configureMarket(
             marketId,
             true,           // enabled
-            0.1e18,         // liquidationBonus (10%)
             1e18,           // maxLiquidationRatio (100%)
             0,              // cooldownPeriod (no cooldown)
             0.01 ether,     // minSeizedAssets
@@ -146,7 +142,6 @@ contract ConfigureTieredLiquidation is Script {
         tieredMorpho.configureMarket(
             marketId,
             true,           // enabled
-            0.1e18,         // liquidationBonus (10%)
             0.5e18,         // maxLiquidationRatio (50% - more conservative for VIP)
             1 hours,        // cooldownPeriod
             0.01 ether,     // minSeizedAssets

@@ -20,11 +20,12 @@ export interface MarketConfig {
     enabled?: boolean;
     publicLiquidationEnabled?: boolean;
     twoStepLiquidationEnabled?: boolean;
-    liquidationBonus?: bigint;
     maxLiquidationRatio?: bigint;
     cooldownPeriod?: bigint;
     minSeizedAssets?: bigint;
     protocolFee?: bigint;
+    lockDuration?: bigint;
+    requestDeposit?: bigint;
     [key: string]: any;
 }
 

@@ -8,7 +8,8 @@ import {IERC20} from "../interfaces/IERC20.sol";
 
 import {MathLib, WAD} from "../libraries/MathLib.sol";
 import {SharesMathLib} from "../libraries/SharesMathLib.sol";
-import {ORACLE_PRICE_SCALE} from "../libraries/ConstantsLib.sol";
+import {ORACLE_PRICE_SCALE, LIQUIDATION_CURSOR, MAX_LIQUIDATION_INCENTIVE_FACTOR} from "../libraries/ConstantsLib.sol";
+import {UtilsLib} from "../libraries/UtilsLib.sol";
 import {MarketParamsLib} from "../libraries/MarketParamsLib.sol";
 import {SafeTransferLib} from "../libraries/SafeTransferLib.sol";
 
@@ -54,7 +55,6 @@ contract TieredLiquidationMorpho {
     error InsufficientCollateral();
     error AtLeastOneModeRequired();
     error LockDurationRequired();
-    error BonusTooHigh();
     error RatioExceeds100();
     error ProtocolFeeTooHigh();
     error MorphoLiquidationExtensionMismatch();
@@ -68,7 +68,7 @@ contract TieredLiquidationMorpho {
         uint256 seizedAssets,
         uint256 repaidAssets,
         uint256 healthFactor,
-        uint256 liquidationBonus
+        uint256 liquidationIncentiveFactor
     );
 
     event LiquidationRequested(
@@ -98,7 +98,6 @@ contract TieredLiquidationMorpho {
 
     event MarketConfigured(
         Id indexed marketId,
-        uint256 liquidationBonus,
         uint256 maxLiquidationRatio,
         uint256 cooldownPeriod,
         uint256 minSeizedAssets,
@@ -123,8 +122,7 @@ contract TieredLiquidationMorpho {
         bool enabled;
         bool publicLiquidationEnabled;
         bool twoStepLiquidationEnabled;
-        // Slot 2-7: uint256 values (each takes full slot)
-        uint256 liquidationBonus;
+        // Slot 2-6: uint256 values (each takes full slot)
         uint256 maxLiquidationRatio;
         uint256 cooldownPeriod;
         uint256 minSeizedAssets;
@@ -213,7 +211,6 @@ contract TieredLiquidationMorpho {
     function configureMarket(
         Id marketId,
         bool enabled,
-        uint256 liquidationBonus,
         uint256 maxLiquidationRatio,
         uint256 cooldownPeriod,
         uint256 minSeizedAssets,
@@ -223,7 +220,6 @@ contract TieredLiquidationMorpho {
         uint256 requestDeposit,
         uint256 protocolFee
     ) external onlyOwner {
-        if (liquidationBonus > 0.2e18) revert BonusTooHigh();
         if (maxLiquidationRatio > WAD) revert RatioExceeds100();
         if (protocolFee > WAD) revert ProtocolFeeTooHigh();
         
@@ -240,7 +236,6 @@ contract TieredLiquidationMorpho {
             enabled: enabled,
             publicLiquidationEnabled: publicLiquidationEnabled,
             twoStepLiquidationEnabled: twoStepLiquidationEnabled,
-            liquidationBonus: liquidationBonus,
             maxLiquidationRatio: maxLiquidationRatio,
             cooldownPeriod: cooldownPeriod,
             minSeizedAssets: minSeizedAssets,
@@ -251,7 +246,6 @@ contract TieredLiquidationMorpho {
 
         emit MarketConfigured(
             marketId,
-            liquidationBonus,
             maxLiquidationRatio,
             cooldownPeriod,
             minSeizedAssets,
@@ -337,10 +331,7 @@ contract TieredLiquidationMorpho {
         (uint256 maxSeizableCollateral, uint256 maxRepayableDebt) =
             HealthFactorLib.calculateLiquidationLimits(pos.collateral, borrowed, config.maxLiquidationRatio);
 
-        uint256 liquidationIncentiveFactor;
-        unchecked {
-            liquidationIncentiveFactor = WAD + config.liquidationBonus;
-        }
+        uint256 liquidationIncentiveFactor = _coreLiquidationIncentiveFactor(marketParams.lltv);
 
         uint256 seizedAssetsToPass;
         uint256 repaidSharesToPass;
@@ -392,9 +383,9 @@ contract TieredLiquidationMorpho {
             }
         }
 
-        // Calculate and collect protocol fee
+        // Calculate and collect protocol fee based on the actual core LIF bonus portion
         if (config.protocolFee > 0) {
-            uint256 totalBonus = actualSeizedAssets.mulDivDown(config.liquidationBonus, liquidationIncentiveFactor);
+            uint256 totalBonus = actualSeizedAssets.mulDivDown(liquidationIncentiveFactor - WAD, liquidationIncentiveFactor);
             uint256 protocolFeeAmount = totalBonus.mulDivDown(config.protocolFee, WAD);
             accumulatedFees[marketId] += protocolFeeAmount;
             unchecked {
@@ -422,7 +413,7 @@ contract TieredLiquidationMorpho {
             actualSeizedAssets,
             actualRepaidAssets,
             healthFactor,
-            config.liquidationBonus
+            liquidationIncentiveFactor
         );
     }
 
@@ -496,12 +487,9 @@ contract TieredLiquidationMorpho {
             }
         }
 
-        // Calculate expected amounts
+        // Calculate expected amounts using core LIF formula
         uint256 debtToRepay = borrowed.mulDivDown(liquidationRatio, WAD);
-        uint256 liquidationIncentiveFactor;
-        unchecked {
-            liquidationIncentiveFactor = WAD + config.liquidationBonus;
-        }
+        uint256 liquidationIncentiveFactor = _coreLiquidationIncentiveFactor(marketParams.lltv);
         uint256 collateralValue = debtToRepay.mulDivUp(liquidationIncentiveFactor, WAD);
         requestedSeizedAssets = collateralValue.mulDivUp(ORACLE_PRICE_SCALE, collateralPrice);
 
@@ -585,12 +573,9 @@ contract TieredLiquidationMorpho {
 
         if (healthFactor >= WAD) revert HealthyPosition();
 
-        // Calculate amounts
+        // Calculate amounts using core LIF formula
         uint256 debtToRepay = borrowed.mulDivDown(storedLiquidationRatio, WAD);
-        uint256 liquidationIncentiveFactor;
-        unchecked {
-            liquidationIncentiveFactor = WAD + config.liquidationBonus;
-        }
+        uint256 liquidationIncentiveFactor = _coreLiquidationIncentiveFactor(marketParams.lltv);
         uint256 collateralValue = debtToRepay.mulDivUp(liquidationIncentiveFactor, WAD);
         uint256 totalSeizedAssets = collateralValue.mulDivUp(ORACLE_PRICE_SCALE, collateralPrice);
 
@@ -621,10 +606,10 @@ contract TieredLiquidationMorpho {
             }
         }
 
-        // Calculate protocol fee
+        // Calculate protocol fee based on the actual core LIF bonus portion
         uint256 liquidatorShare = actualSeizedAssets;
         if (config.protocolFee > 0) {
-            uint256 totalBonus = actualSeizedAssets.mulDivDown(config.liquidationBonus, liquidationIncentiveFactor);
+            uint256 totalBonus = actualSeizedAssets.mulDivDown(liquidationIncentiveFactor - WAD, liquidationIncentiveFactor);
             uint256 protocolFeeAmount = totalBonus.mulDivDown(config.protocolFee, WAD);
             accumulatedFees[marketId] += protocolFeeAmount;
             unchecked {
@@ -814,6 +799,15 @@ contract TieredLiquidationMorpho {
         }
 
         emit LiquidationRequestCancelled(marketId, borrower, msg.sender, true);
+    }
+
+    /// @notice Computes the liquidation incentive factor using the same formula as Morpho core
+    /// @dev LIF = min(MAX_LIQUIDATION_INCENTIVE_FACTOR, WAD / (WAD - LIQUIDATION_CURSOR * (WAD - lltv)))
+    function _coreLiquidationIncentiveFactor(uint256 lltv) internal pure returns (uint256) {
+        return UtilsLib.min(
+            MAX_LIQUIDATION_INCENTIVE_FACTOR,
+            WAD.wDivDown(WAD - LIQUIDATION_CURSOR.wMulDown(WAD - lltv))
+        );
     }
 
     /// @notice Receive ETH for deposits

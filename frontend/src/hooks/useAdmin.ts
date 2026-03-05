@@ -103,7 +103,6 @@ export function useAdmin(signer: JsonRpcSigner | null, chainConfig: ChainConfig 
     marketId: string,
     config: {
       enabled: boolean;
-      liquidationBonus: bigint;
       maxLiquidationRatio: bigint;
       cooldownPeriod: bigint;
       minSeizedAssets: bigint;
@@ -125,7 +124,6 @@ export function useAdmin(signer: JsonRpcSigner | null, chainConfig: ChainConfig 
       const tx = await tieredLiq.configureMarket(
         marketId,
         config.enabled,
-        config.liquidationBonus,
         config.maxLiquidationRatio,
         config.cooldownPeriod,
         config.minSeizedAssets,

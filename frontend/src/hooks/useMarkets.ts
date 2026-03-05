@@ -318,13 +318,12 @@ export function useMarkets(signer: JsonRpcSigner | null, chainConfig: ChainConfi
               enabled: configData[0],
               publicLiquidationEnabled: configData[1],
               twoStepLiquidationEnabled: configData[2],
-              liquidationBonus: BigInt(configData[3].toString()),
-              maxLiquidationRatio: BigInt(configData[4].toString()),
-              cooldownPeriod: BigInt(configData[5].toString()),
-              minSeizedAssets: BigInt(configData[6].toString()),
-              protocolFee: BigInt(configData[7].toString()),
-              lockDuration: BigInt(configData[8].toString()),
-              requestDeposit: BigInt(configData[9].toString()),
+              maxLiquidationRatio: BigInt(configData[3].toString()),
+              cooldownPeriod: BigInt(configData[4].toString()),
+              minSeizedAssets: BigInt(configData[5].toString()),
+              protocolFee: BigInt(configData[6].toString()),
+              lockDuration: BigInt(configData[7].toString()),
+              requestDeposit: BigInt(configData[8].toString()),
             };
           }
 
