@@ -16,10 +16,11 @@ import {MorphoBalancesLib} from "../libraries/periphery/MorphoBalancesLib.sol";
 
 import {WhitelistRegistry} from "./WhitelistRegistry.sol";
 import {HealthFactorLib} from "./libraries/HealthFactorLib.sol";
+import {ReentrancyGuard} from "openzeppelin-contracts/contracts/security/ReentrancyGuard.sol";
 
 /// @title TieredLiquidationMorpho
 /// @notice Hybrid liquidation: public one-step + whitelist two-step on top of Morpho Blue
-contract TieredLiquidationMorpho {
+contract TieredLiquidationMorpho is ReentrancyGuard {
     using MathLib for uint256;
     using SharesMathLib for uint256;
     using SafeTransferLib for IERC20;
@@ -196,7 +197,7 @@ contract TieredLiquidationMorpho {
         uint256 seizedAssets,
         uint256 repaidShares,
         bytes calldata data
-    ) external returns (uint256 actualSeizedAssets, uint256 actualRepaidAssets) {
+    ) external nonReentrant returns (uint256 actualSeizedAssets, uint256 actualRepaidAssets) {
         Id marketId = marketParams.id();
         MarketConfig memory config = marketConfigs[marketId];
         if (!config.enabled) revert MarketNotConfigured();
@@ -259,7 +260,7 @@ contract TieredLiquidationMorpho {
         MarketParams calldata marketParams,
         address borrower,
         uint256 liquidationRatio
-    ) external payable returns (uint256 requestedSeizedAssets, uint256 requestedRepaidAssets) {
+    ) external payable nonReentrant returns (uint256 requestedSeizedAssets, uint256 requestedRepaidAssets) {
         Id marketId = marketParams.id();
         MarketConfig memory config = marketConfigs[marketId];
         if (!config.enabled) revert MarketNotConfigured();
@@ -297,7 +298,7 @@ contract TieredLiquidationMorpho {
         MarketParams calldata marketParams,
         address borrower,
         bytes calldata data
-    ) external returns (uint256 actualSeizedAssets, uint256 actualRepaidAssets) {
+    ) external nonReentrant returns (uint256 actualSeizedAssets, uint256 actualRepaidAssets) {
         Id marketId = marketParams.id();
         MarketConfig memory config = marketConfigs[marketId];
         LiquidationRequest storage request = liquidationRequests[marketId][borrower];
@@ -342,7 +343,7 @@ contract TieredLiquidationMorpho {
 
     /* ── Cancel / Claim ────────────────────────────────────── */
 
-    function cancelLiquidationRequest(MarketParams calldata marketParams, address borrower) external {
+    function cancelLiquidationRequest(MarketParams calldata marketParams, address borrower) external nonReentrant {
         Id marketId = marketParams.id();
         LiquidationRequest storage request = liquidationRequests[marketId][borrower];
         if (request.status != LiquidationStatus.Pending) revert NoActiveRequest();
@@ -358,7 +359,7 @@ contract TieredLiquidationMorpho {
         emit LiquidationRequestCancelled(marketId, borrower, msg.sender, isExpired);
     }
 
-    function claimFailedRefund() external {
+    function claimFailedRefund() external nonReentrant {
         uint256 amount = failedRefunds[msg.sender];
         if (amount == 0) revert NoFailedRefund();
         failedRefunds[msg.sender] = 0;
