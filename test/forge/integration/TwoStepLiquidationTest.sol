@@ -745,5 +745,95 @@ contract TwoStepLiquidationTest is BaseTest {
         vm.stopPrank();
     }
 
+    /* ============ 6.10 FIX: EXPIRY BOUNDARY CONSISTENCY TESTS ============ */
+
+    function testAtExactExpiryRequestIsStillLockedAndExecutable() public {
+        uint256 collateralAmount = 10 ether;
+        uint256 borrowAmount = 7 ether;
+
+        _setupBorrowerPosition(collateralAmount, borrowAmount);
+        oracle.setPrice(ORACLE_PRICE_SCALE * 85 / 100);
+
+        vm.deal(liquidator, 1 ether);
+        loanToken.setBalance(liquidator, 20 ether);
+
+        vm.startPrank(liquidator);
+        loanToken.approve(address(tieredMorpho), type(uint256).max);
+        tieredMorpho.requestLiquidation{value: REQUEST_DEPOSIT}(marketParams, borrower, 0.5e18);
+        vm.stopPrank();
+
+        (,,,,, uint256 expiresAt) = tieredMorpho.getLiquidationRequest(id, borrower);
+
+        // Warp to exactly expiresAt
+        vm.warp(expiresAt);
+
+        // One-step liquidation should be blocked (still locked at == expiresAt)
+        loanToken.setBalance(publicLiquidator, 20 ether);
+        vm.startPrank(publicLiquidator);
+        loanToken.approve(address(tieredMorpho), type(uint256).max);
+        vm.expectRevert(TieredLiquidationMorpho.LiquidationRequestLocked.selector);
+        tieredMorpho.liquidate(marketParams, borrower, 1 ether, 0, "");
+        vm.stopPrank();
+
+        // Two-step execute should succeed (not expired at == expiresAt)
+        vm.prank(liquidator);
+        (uint256 seized, uint256 repaid) = tieredMorpho.executeLiquidation(marketParams, borrower, "");
+
+        assertGt(repaid, 0, "Should execute at exact expiresAt");
+        assertGt(seized, 0, "Should seize collateral at exact expiresAt");
+    }
+
+    function testAtExactExpiryThirdPartyCannotCancel() public {
+        uint256 collateralAmount = 10 ether;
+        uint256 borrowAmount = 7 ether;
+
+        _setupBorrowerPosition(collateralAmount, borrowAmount);
+        oracle.setPrice(ORACLE_PRICE_SCALE * 85 / 100);
+
+        vm.deal(liquidator, 1 ether);
+        loanToken.setBalance(liquidator, 20 ether);
+
+        vm.startPrank(liquidator);
+        loanToken.approve(address(tieredMorpho), type(uint256).max);
+        tieredMorpho.requestLiquidation{value: REQUEST_DEPOSIT}(marketParams, borrower, 0.5e18);
+        vm.stopPrank();
+
+        (,,,,, uint256 expiresAt) = tieredMorpho.getLiquidationRequest(id, borrower);
+        vm.warp(expiresAt);
+
+        // Third party should NOT be able to cancel at exact expiresAt
+        vm.prank(publicLiquidator);
+        vm.expectRevert(TieredLiquidationMorpho.RequestNotExpired.selector);
+        tieredMorpho.cancelLiquidationRequest(marketParams, borrower);
+    }
+
+    function testOneSecondAfterExpiryIsFullyExpired() public {
+        uint256 collateralAmount = 10 ether;
+        uint256 borrowAmount = 7 ether;
+
+        _setupBorrowerPosition(collateralAmount, borrowAmount);
+        oracle.setPrice(ORACLE_PRICE_SCALE * 85 / 100);
+
+        vm.deal(liquidator, 1 ether);
+        loanToken.setBalance(liquidator, 20 ether);
+
+        vm.startPrank(liquidator);
+        loanToken.approve(address(tieredMorpho), type(uint256).max);
+        tieredMorpho.requestLiquidation{value: REQUEST_DEPOSIT}(marketParams, borrower, 0.5e18);
+        vm.stopPrank();
+
+        (,,,,, uint256 expiresAt) = tieredMorpho.getLiquidationRequest(id, borrower);
+        vm.warp(expiresAt + 1);
+
+        // Execute should fail (expired)
+        vm.prank(liquidator);
+        vm.expectRevert(TieredLiquidationMorpho.LiquidationRequestExpired.selector);
+        tieredMorpho.executeLiquidation(marketParams, borrower, "");
+
+        // Third party can cancel (expired)
+        vm.prank(publicLiquidator);
+        tieredMorpho.cancelLiquidationRequest(marketParams, borrower);
+    }
+
     receive() external payable {}
 }

@@ -132,7 +132,7 @@ export function LiquidationPanel({
   }, [chainConfig]);
 
   const formatCountdown = useCallback((seconds: number): string => {
-    if (seconds <= 0) return t('countdown.expired');
+    if (seconds < 0) return t('countdown.expired');
     const h = Math.floor(seconds / 3600);
     const m = Math.floor((seconds % 3600) / 60);
     const s = seconds % 60;
@@ -192,7 +192,7 @@ export function LiquidationPanel({
     const updateCountdown = () => {
       const now = Math.floor(Date.now() / 1000);
       const remaining = Number(liquidationRequest.expiresAt) - now;
-      if (remaining <= 0) {
+      if (remaining < 0) {
         setCountdown(t('countdown.expired'));
         setIsExpired(true);
         if (countdownTimerRef.current) clearInterval(countdownTimerRef.current);

@@ -309,11 +309,11 @@ contract TieredLiquidationMorpho {
             revert PublicLiquidationNotEnabled();
         }
 
-        // Check two-step request lock
+        // Check two-step request lock (expiresAt is inclusive: still locked at == expiresAt)
         {
             LiquidationRequest storage request = liquidationRequests[marketId][borrower];
             if (request.status == LiquidationStatus.Pending) {
-                if (block.timestamp < uint256(request.expiresAt)) {
+                if (block.timestamp <= uint256(request.expiresAt)) {
                     revert LiquidationRequestLocked();
                 }
                 _clearExpiredRequest(marketId, borrower, request);
@@ -472,10 +472,10 @@ contract TieredLiquidationMorpho {
             revert InsufficientDeposit();
         }
 
-        // Check existing request
+        // Check existing request (expiresAt is inclusive: still locked at == expiresAt)
         LiquidationRequest storage existingRequest = liquidationRequests[marketId][borrower];
         if (existingRequest.status == LiquidationStatus.Pending) {
-            if (block.timestamp < uint256(existingRequest.expiresAt)) {
+            if (block.timestamp <= uint256(existingRequest.expiresAt)) {
                 revert LiquidationRequestLocked();
             }
             _clearExpiredRequest(marketId, borrower, existingRequest);
