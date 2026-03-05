@@ -77,4 +77,7 @@ library ErrorsLib {
 
     /// @notice Thrown when the maximum uint128 is exceeded.
     string internal constant MAX_UINT128_EXCEEDED = "max uint128 exceeded";
+
+    /// @notice Thrown when liquidation must go through the designated extension contract.
+    string internal constant LIQUIDATION_RESTRICTED = "liquidation restricted to extension";
 }
