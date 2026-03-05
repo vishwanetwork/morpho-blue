@@ -29,6 +29,19 @@ contract TieredLiquidationMorpho {
     using MarketParamsLib for MarketParams;
     using MorphoBalancesLib for IMorpho;
 
+    /* REENTRANCY GUARD */
+
+    uint256 private constant _NOT_ENTERED = 1;
+    uint256 private constant _ENTERED = 2;
+    uint256 private _reentrancyStatus = _NOT_ENTERED;
+
+    modifier nonReentrant() {
+        require(_reentrancyStatus != _ENTERED, "ReentrancyGuard: reentrant call");
+        _reentrancyStatus = _ENTERED;
+        _;
+        _reentrancyStatus = _NOT_ENTERED;
+    }
+
     /* ERRORS */
 
     error Unauthorized();
@@ -267,7 +280,7 @@ contract TieredLiquidationMorpho {
         uint256 seizedAssets,
         uint256 repaidShares,
         bytes calldata data
-    ) external returns (uint256 actualSeizedAssets, uint256 actualRepaidAssets) {
+    ) external nonReentrant returns (uint256 actualSeizedAssets, uint256 actualRepaidAssets) {
         Id marketId = marketParams.id();
         
         // Cache config in memory to avoid multiple SLOADs
@@ -427,7 +440,7 @@ contract TieredLiquidationMorpho {
         MarketParams calldata marketParams,
         address borrower,
         uint256 liquidationRatio
-    ) external payable returns (uint256 requestedSeizedAssets, uint256 requestedRepaidAssets) {
+    ) external payable nonReentrant returns (uint256 requestedSeizedAssets, uint256 requestedRepaidAssets) {
         Id marketId = marketParams.id();
         MarketConfig memory config = marketConfigs[marketId];
 
@@ -533,7 +546,7 @@ contract TieredLiquidationMorpho {
         MarketParams calldata marketParams,
         address borrower,
         bytes calldata data
-    ) external returns (uint256 actualSeizedAssets, uint256 actualRepaidAssets) {
+    ) external nonReentrant returns (uint256 actualSeizedAssets, uint256 actualRepaidAssets) {
         Id marketId = marketParams.id();
         MarketConfig memory config = marketConfigs[marketId];
         
@@ -654,7 +667,7 @@ contract TieredLiquidationMorpho {
     function cancelLiquidationRequest(
         MarketParams calldata marketParams,
         address borrower
-    ) external {
+    ) external nonReentrant {
         Id marketId = marketParams.id();
         LiquidationRequest storage request = liquidationRequests[marketId][borrower];
 
@@ -688,7 +701,7 @@ contract TieredLiquidationMorpho {
     }
 
     /// @notice Claim failed refunds
-    function claimFailedRefund() external {
+    function claimFailedRefund() external nonReentrant {
         uint256 amount = failedRefunds[msg.sender];
         if (amount == 0) revert NoFailedRefund();
         
