@@ -108,6 +108,7 @@ export function useAdmin(signer: JsonRpcSigner | null, chainConfig: ChainConfig 
       minSeizedAssets: bigint;
       publicLiquidationEnabled: boolean;
       twoStepLiquidationEnabled: boolean;
+      whitelistOneStepEnabled: boolean;
       lockDuration: bigint;
       requestDeposit: bigint;
       protocolFee: bigint;
@@ -129,6 +130,7 @@ export function useAdmin(signer: JsonRpcSigner | null, chainConfig: ChainConfig 
         config.minSeizedAssets,
         config.publicLiquidationEnabled,
         config.twoStepLiquidationEnabled,
+        config.whitelistOneStepEnabled,
         config.lockDuration,
         config.requestDeposit,
         config.protocolFee

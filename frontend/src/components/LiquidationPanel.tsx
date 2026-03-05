@@ -22,6 +22,9 @@ function parseLiquidationError(err: unknown, action: 'liquidate' | 'request' | '
   if (errorStr.includes('TwoStepLiquidationNotEnabled')) {
     return t('errors.twoStepNotEnabled');
   }
+  if (errorStr.includes('WhitelistOneStepNotEnabled')) {
+    return t('errors.whitelistOneStepNotEnabled');
+  }
   if (errorStr.includes('LiquidationRequestLocked')) {
     return t('errors.requestLocked');
   }

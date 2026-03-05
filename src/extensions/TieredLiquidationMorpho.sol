@@ -73,6 +73,7 @@ contract TieredLiquidationMorpho {
     error RatioExceeds100();
     error ProtocolFeeTooHigh();
     error MorphoLiquidationExtensionMismatch();
+    error WhitelistOneStepNotEnabled();
 
     /* EVENTS */
 
@@ -118,6 +119,7 @@ contract TieredLiquidationMorpho {
         uint256 minSeizedAssets,
         bool publicLiquidationEnabled,
         bool twoStepLiquidationEnabled,
+        bool whitelistOneStepEnabled,
         uint256 lockDuration,
         uint256 protocolFee
     );
@@ -133,10 +135,11 @@ contract TieredLiquidationMorpho {
     /// @notice Market configuration with hybrid mode support
     /// @dev Packed for gas optimization: bools grouped together
     struct MarketConfig {
-        // Slot 1: packed bools (3 bytes) + padding
+        // Slot 1: packed bools (4 bytes) + padding
         bool enabled;
         bool publicLiquidationEnabled;
         bool twoStepLiquidationEnabled;
+        bool whitelistOneStepEnabled;
         // Slot 2-6: uint256 values (each takes full slot)
         uint256 maxLiquidationRatio;
         uint256 cooldownPeriod;
@@ -231,6 +234,7 @@ contract TieredLiquidationMorpho {
         uint256 minSeizedAssets,
         bool publicLiquidationEnabled,
         bool twoStepLiquidationEnabled,
+        bool whitelistOneStepEnabled,
         uint256 lockDuration,
         uint256 requestDeposit,
         uint256 protocolFee
@@ -251,6 +255,7 @@ contract TieredLiquidationMorpho {
             enabled: enabled,
             publicLiquidationEnabled: publicLiquidationEnabled,
             twoStepLiquidationEnabled: twoStepLiquidationEnabled,
+            whitelistOneStepEnabled: whitelistOneStepEnabled,
             maxLiquidationRatio: maxLiquidationRatio,
             cooldownPeriod: cooldownPeriod,
             minSeizedAssets: minSeizedAssets,
@@ -266,6 +271,7 @@ contract TieredLiquidationMorpho {
             minSeizedAssets,
             publicLiquidationEnabled,
             twoStepLiquidationEnabled,
+            whitelistOneStepEnabled,
             lockDuration,
             protocolFee
         );
@@ -291,7 +297,12 @@ contract TieredLiquidationMorpho {
         // Permission check
         bool isWhitelisted = WHITELIST_REGISTRY.canLiquidate(marketId, msg.sender);
         
-        if (!config.publicLiquidationEnabled && !isWhitelisted) {
+        if (config.publicLiquidationEnabled) {
+            // Public mode: anyone can one-step liquidate
+        } else if (isWhitelisted) {
+            // Whitelist user: must have whitelistOneStepEnabled
+            if (!config.whitelistOneStepEnabled) revert WhitelistOneStepNotEnabled();
+        } else {
             revert PublicLiquidationNotEnabled();
         }
 
@@ -781,6 +792,7 @@ contract TieredLiquidationMorpho {
         MarketConfig storage config = marketConfigs[marketId];
         if (!config.enabled) return false;
         if (config.publicLiquidationEnabled) return true;
+        if (!config.whitelistOneStepEnabled) return false;
         return WHITELIST_REGISTRY.canLiquidate(marketId, liquidator);
     }
 

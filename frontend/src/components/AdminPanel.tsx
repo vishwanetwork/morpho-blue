@@ -23,6 +23,7 @@ interface AdminPanelProps {
     minSeizedAssets: bigint;
     publicLiquidationEnabled: boolean;
     twoStepLiquidationEnabled: boolean;
+    whitelistOneStepEnabled: boolean;
     lockDuration: bigint;
     requestDeposit: bigint;
     protocolFee: bigint;
@@ -54,6 +55,7 @@ export function AdminPanel({
     enabled: true,
     publicLiquidation: true,
     twoStepLiquidation: false,
+    whitelistOneStep: true,
     maxLiquidationRatio: '1',
     cooldownPeriod: '3600',
     minSeizedAssets: '0',
@@ -142,6 +144,7 @@ export function AdminPanel({
         minSeizedAssets: parseUnits(config.minSeizedAssets, 18),
         publicLiquidationEnabled: config.publicLiquidation,
         twoStepLiquidationEnabled: config.twoStepLiquidation,
+        whitelistOneStepEnabled: config.whitelistOneStep,
         lockDuration: BigInt(config.lockDuration),
         requestDeposit: parseUnits(config.requestDeposit, 18),
         protocolFee: parseUnits(config.protocolFee, 18),
@@ -309,6 +312,15 @@ export function AdminPanel({
                   type="checkbox"
                   checked={config.twoStepLiquidation}
                   onChange={(e) => setConfig({ ...config, twoStepLiquidation: e.target.checked })}
+                  className="w-5 h-5"
+                />
+              </div>
+              <div className="flex items-center justify-between">
+                <span className="text-gray-400">{t('admin.whitelistOneStep')}</span>
+                <input
+                  type="checkbox"
+                  checked={config.whitelistOneStep}
+                  onChange={(e) => setConfig({ ...config, whitelistOneStep: e.target.checked })}
                   className="w-5 h-5"
                 />
               </div>

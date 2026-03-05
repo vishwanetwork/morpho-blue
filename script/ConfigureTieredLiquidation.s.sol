@@ -60,6 +60,7 @@ contract ConfigureTieredLiquidation is Script {
             0.01 ether,     // minSeizedAssets
             true,           // publicLiquidationEnabled
             true,           // twoStepLiquidationEnabled
+            true,           // whitelistOneStepEnabled
             1 hours,        // lockDuration
             0.1 ether,      // requestDeposit
             0.5e18          // protocolFee (50%)
@@ -75,11 +76,12 @@ contract ConfigureTieredLiquidation is Script {
         console.log("Market ID:", uint256(Id.unwrap(marketId)));
         console.log("Market Admin:", marketAdmin);
         
-        // Check configuration (struct order: enabled, publicLiquidationEnabled, twoStepLiquidationEnabled, ...)
+        // Check configuration (struct order: enabled, publicLiquidationEnabled, twoStepLiquidationEnabled, whitelistOneStepEnabled, ...)
         (
             bool enabled,
             bool publicLiquidationEnabled,
             bool twoStepLiquidationEnabled,
+            bool whitelistOneStepEnabled,
             uint256 maxLiquidationRatio,
             uint256 cooldownPeriod,
             uint256 minSeizedAssets,
@@ -92,6 +94,7 @@ contract ConfigureTieredLiquidation is Script {
         console.log("Enabled:", enabled);
         console.log("Public Liquidation Enabled:", publicLiquidationEnabled);
         console.log("Two-Step Liquidation Enabled:", twoStepLiquidationEnabled);
+        console.log("Whitelist One-Step Enabled:", whitelistOneStepEnabled);
         console.log("Max Liquidation Ratio:", maxLiquidationRatio);
         console.log("Cooldown Period:", cooldownPeriod);
         console.log("Min Seized Assets:", minSeizedAssets);
@@ -119,6 +122,7 @@ contract ConfigureTieredLiquidation is Script {
             0.01 ether,     // minSeizedAssets
             true,           // publicLiquidationEnabled (anyone can liquidate)
             false,          // twoStepLiquidationEnabled (no two-step)
+            false,          // whitelistOneStepEnabled (not needed, public mode)
             0,              // lockDuration (not needed)
             0,              // requestDeposit (not needed)
             0.5e18          // protocolFee (50%)
@@ -146,6 +150,7 @@ contract ConfigureTieredLiquidation is Script {
             0.01 ether,     // minSeizedAssets
             false,          // publicLiquidationEnabled (public cannot liquidate)
             true,           // twoStepLiquidationEnabled (whitelist only two-step)
+            false,          // whitelistOneStepEnabled (force whitelist to use two-step only)
             2 hours,        // lockDuration (2 hour window for VIP to prepare funds)
             0.5 ether,      // requestDeposit (higher deposit for commitment)
             0.3e18          // protocolFee (30% - lower fee for VIP)

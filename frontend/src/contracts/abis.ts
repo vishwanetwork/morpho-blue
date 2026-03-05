@@ -17,11 +17,11 @@ export const ORACLE_ABI = [
 export const TIERED_LIQUIDATION_ABI = [
     "function getHealthFactor((address,address,address,address,uint256),address) view returns (uint256)",
     "function getLiquidationRequest(bytes32,address) view returns (tuple(address,uint256,uint256,uint256,uint8,uint256))",
-    "function marketConfigs(bytes32) view returns (tuple(bool,bool,bool,uint256,uint256,uint256,uint256,uint256,uint256))",
+    "function marketConfigs(bytes32) view returns (tuple(bool,bool,bool,bool,uint256,uint256,uint256,uint256,uint256,uint256))",
     "function addLiquidator(bytes32,address)",
     "function removeLiquidator(bytes32,address)",
     "function setWhitelistMode(bytes32,bool)",
-    "function configureMarket(bytes32,bool,uint256,uint256,uint256,bool,bool,uint256,uint256,uint256)"
+    "function configureMarket(bytes32,bool,uint256,uint256,uint256,bool,bool,bool,uint256,uint256,uint256)"
 ];
 
 export const MORPHO_ABI = [

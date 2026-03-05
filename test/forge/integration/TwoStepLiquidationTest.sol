@@ -48,6 +48,7 @@ contract TwoStepLiquidationTest is BaseTest {
             0,              // minSeizedAssets (no minimum)
             true,           // publicLiquidationEnabled
             true,           // twoStepLiquidationEnabled
+            true,           // whitelistOneStepEnabled
             LOCK_DURATION,  // lockDuration
             REQUEST_DEPOSIT,// requestDeposit
             0.5e18          // protocolFee (50%)
@@ -114,6 +115,7 @@ contract TwoStepLiquidationTest is BaseTest {
             0,              // minSeizedAssets
             false,          // publicLiquidationEnabled = false
             true,           // twoStepLiquidationEnabled
+            false,          // whitelistOneStepEnabled = false (force two-step)
             LOCK_DURATION,
             REQUEST_DEPOSIT,
             0.5e18
@@ -361,6 +363,7 @@ contract TwoStepLiquidationTest is BaseTest {
             0,              // minSeizedAssets
             true,           // publicLiquidationEnabled
             true,           // twoStepLiquidationEnabled
+            true,           // whitelistOneStepEnabled
             LOCK_DURATION,
             REQUEST_DEPOSIT,
             0.5e18
@@ -396,6 +399,7 @@ contract TwoStepLiquidationTest is BaseTest {
             0,              // minSeizedAssets
             true,           // publicLiquidationEnabled
             true,           // twoStepLiquidationEnabled
+            true,           // whitelistOneStepEnabled
             LOCK_DURATION,
             REQUEST_DEPOSIT,
             0.5e18
@@ -431,6 +435,7 @@ contract TwoStepLiquidationTest is BaseTest {
             0,              // minSeizedAssets
             true,           // publicLiquidationEnabled
             false,          // twoStepLiquidationEnabled
+            true,           // whitelistOneStepEnabled
             0,              // lockDuration ignored when two-step disabled
             REQUEST_DEPOSIT,
             0.5e18
@@ -545,6 +550,50 @@ contract TwoStepLiquidationTest is BaseTest {
         assertGt(seized, 0, "Should seize collateral");
     }
 
+    function testWhitelistOneStepBlockedWhenDisabled() public {
+        // 6.8 fix: disable whitelist one-step so whitelisted users must use two-step
+        tieredMorpho.configureMarket(
+            id,
+            true,           // enabled
+            WAD,            // maxLiquidationRatio
+            0,              // cooldownPeriod
+            0,              // minSeizedAssets
+            false,          // publicLiquidationEnabled
+            true,           // twoStepLiquidationEnabled
+            false,          // whitelistOneStepEnabled = false
+            LOCK_DURATION,
+            REQUEST_DEPOSIT,
+            0.5e18
+        );
+
+        uint256 collateralAmount = 10 ether;
+        uint256 borrowAmount = 7 ether;
+
+        _setupBorrowerPosition(collateralAmount, borrowAmount);
+        oracle.setPrice(ORACLE_PRICE_SCALE * 85 / 100);
+
+        vm.deal(liquidator, 1 ether);
+        loanToken.setBalance(liquidator, 20 ether);
+
+        vm.startPrank(liquidator);
+        loanToken.approve(address(tieredMorpho), type(uint256).max);
+
+        // Whitelisted user should be blocked from one-step when whitelistOneStepEnabled = false
+        vm.expectRevert(TieredLiquidationMorpho.WhitelistOneStepNotEnabled.selector);
+        tieredMorpho.liquidate(marketParams, borrower, 1 ether, 0, "");
+        vm.stopPrank();
+
+        // But whitelisted user can still use two-step
+        vm.startPrank(liquidator);
+        tieredMorpho.requestLiquidation{value: REQUEST_DEPOSIT}(marketParams, borrower, 0.5e18);
+
+        (uint256 actualSeized, uint256 actualRepaid) = tieredMorpho.executeLiquidation(marketParams, borrower, "");
+        vm.stopPrank();
+
+        assertGt(actualRepaid, 0, "Whitelist user should be able to use two-step");
+        assertGt(actualSeized, 0, "Should seize collateral via two-step");
+    }
+
     function testViewFunctions() public {
         // Test canLiquidateOneStep
         assertTrue(tieredMorpho.canLiquidateOneStep(id, publicLiquidator), "Public should be able to one-step");
@@ -553,6 +602,26 @@ contract TwoStepLiquidationTest is BaseTest {
         // Test canLiquidateTwoStep
         assertFalse(tieredMorpho.canLiquidateTwoStep(id, publicLiquidator), "Public should NOT be able to two-step");
         assertTrue(tieredMorpho.canLiquidateTwoStep(id, liquidator), "Whitelist should be able to two-step");
+    }
+
+    function testViewFunctionsWhitelistOneStepDisabled() public {
+        // Disable whitelist one-step
+        tieredMorpho.configureMarket(
+            id,
+            true,           // enabled
+            WAD,
+            0,
+            0,
+            false,          // publicLiquidationEnabled
+            true,           // twoStepLiquidationEnabled
+            false,          // whitelistOneStepEnabled = false
+            LOCK_DURATION,
+            REQUEST_DEPOSIT,
+            0.5e18
+        );
+
+        assertFalse(tieredMorpho.canLiquidateOneStep(id, liquidator), "Whitelist should NOT be able to one-step when disabled");
+        assertTrue(tieredMorpho.canLiquidateTwoStep(id, liquidator), "Whitelist should still be able to two-step");
     }
 
     receive() external payable {}
