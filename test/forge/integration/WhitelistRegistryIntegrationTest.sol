@@ -74,7 +74,6 @@ contract WhitelistRegistryIntegrationTest is BaseTest {
 
         vm.startPrank(admin1);
         registry.addLiquidator(id, liquidator1);
-        registry.setWhitelistMode(id, true);
 
         vm.expectRevert(WhitelistRegistry.MinLiquidatorsRequired.selector);
         registry.removeLiquidator(id, liquidator1);
@@ -106,22 +105,20 @@ contract WhitelistRegistryIntegrationTest is BaseTest {
         vm.startPrank(admin1);
         registry.addLiquidator(id, liquidator1);
 
-        assertFalse(registry.isWhitelistEnabled(id), "Whitelist should be disabled by default");
-        assertTrue(registry.canLiquidate(id, liquidator2), "Anyone can liquidate when disabled");
-
-        registry.setWhitelistMode(id, true);
+        assertTrue(registry.isWhitelistEnabled(id), "Whitelist should be enabled by default");
         assertTrue(registry.isWhitelistEnabled(id), "Whitelist should be enabled");
         assertTrue(registry.canLiquidate(id, liquidator1), "Whitelisted liquidator can liquidate");
         assertFalse(registry.canLiquidate(id, liquidator2), "Non-whitelisted cannot liquidate");
+
+        registry.setWhitelistMode(id, false);
+        assertFalse(registry.isWhitelistEnabled(id), "Whitelist can be disabled");
+        assertTrue(registry.canLiquidate(id, liquidator2), "Anyone can liquidate when disabled");
         vm.stopPrank();
     }
 
     function testAdminCanAlwaysLiquidate() public {
         vm.prank(OWNER);
         registry.initializeMarket(id, admin1);
-
-        vm.prank(admin1);
-        registry.setWhitelistMode(id, true);
 
         assertTrue(registry.canLiquidate(id, admin1), "Admin can always liquidate");
         assertTrue(registry.canLiquidate(id, OWNER), "Owner can always liquidate");

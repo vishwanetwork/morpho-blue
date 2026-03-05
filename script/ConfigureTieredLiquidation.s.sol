@@ -66,9 +66,8 @@ contract ConfigureTieredLiquidation is Script {
         );
         console.log("Hybrid liquidation configured for market:", uint256(Id.unwrap(marketId)));
 
-        // 3. Enable whitelist mode for VIP liquidators
-        whitelistRegistry.setWhitelistMode(marketId, true);
-        console.log("Whitelist mode enabled");
+        // 3. Whitelist mode is auto-enabled during initializeMarket
+        console.log("Whitelist mode auto-enabled");
 
         vm.stopBroadcast();
 
