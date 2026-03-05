@@ -53,10 +53,9 @@ contract TwoStepLiquidationTest is BaseTest {
             0.5e18          // protocolFee (50%)
         );
 
-        // Setup whitelist
+        // Setup whitelist (initializeMarket now auto-enables whitelist)
         whitelistRegistry.initializeMarket(id, address(this));
         whitelistRegistry.addLiquidator(id, liquidator);
-        whitelistRegistry.setWhitelistMode(id, true);
 
         // Fund the contract for potential refunds
         vm.deal(address(this), 10 ether);

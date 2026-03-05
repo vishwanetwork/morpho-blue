@@ -131,7 +131,10 @@ contract WhitelistRegistry {
         if (marketAdmin[marketId] != address(0)) revert AlreadySet();
         
         marketAdmin[marketId] = admin;
+        isWhitelistEnabled[marketId] = true;
+
         emit MarketAdminTransferred(marketId, address(0), admin);
+        emit WhitelistModeSet(marketId, true);
     }
 
     /// @notice Initiate market admin transfer (Step 1: propose)
