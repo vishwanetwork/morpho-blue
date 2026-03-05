@@ -381,15 +381,18 @@ contract TieredLiquidationMorpho {
             revert InvalidLiquidationAmount();
         }
 
-        // Pull and approve loan tokens
+        // Pull and approve loan tokens (exact amount, USDT-safe)
         address loanToken = marketParams.loanToken;
         IERC20(loanToken).safeTransferFrom(msg.sender, address(this), estimatedRepayAmount);
-        _approveToken(loanToken, address(MORPHO));
+        _approveToken(loanToken, address(MORPHO), estimatedRepayAmount);
 
         // Execute liquidation
         (actualSeizedAssets, actualRepaidAssets) = MORPHO.liquidate(
             marketParams, borrower, seizedAssetsToPass, repaidSharesToPass, data
         );
+
+        // Reset allowance to 0 after use
+        _approveToken(loanToken, address(MORPHO), 0);
 
         // Return unused loan tokens
         unchecked {
@@ -611,7 +614,7 @@ contract TieredLiquidationMorpho {
         }
         address loanToken = marketParams.loanToken;
         IERC20(loanToken).safeTransferFrom(msg.sender, address(this), estimatedRepay);
-        _approveToken(loanToken, address(MORPHO));
+        _approveToken(loanToken, address(MORPHO), estimatedRepay);
 
         // Execute through Morpho
         (actualSeizedAssets, actualRepaidAssets) = MORPHO.liquidate(
@@ -621,6 +624,9 @@ contract TieredLiquidationMorpho {
             0,
             data
         );
+
+        // Reset allowance to 0 after use
+        _approveToken(loanToken, address(MORPHO), 0);
 
         // Return unused loan tokens
         unchecked {
@@ -788,13 +794,14 @@ contract TieredLiquidationMorpho {
 
     /* INTERNAL FUNCTIONS */
 
-    /// @notice Approve token spending (max approval, only if needed)
-    function _approveToken(address token, address spender) internal {
-        // Use low-level call to handle non-standard ERC20
-        (bool success,) = token.call(
-            abi.encodeWithSignature("approve(address,uint256)", spender, type(uint256).max)
-        );
-        if (!success) revert ApproveFailed();
+    /// @notice Approve exact token amount, USDT-safe (reset to 0 first)
+    function _approveToken(address token, address spender, uint256 amount) internal {
+        (bool s0,) = token.call(abi.encodeWithSignature("approve(address,uint256)", spender, uint256(0)));
+        if (!s0) revert ApproveFailed();
+        if (amount > 0) {
+            (bool s1,) = token.call(abi.encodeWithSignature("approve(address,uint256)", spender, amount));
+            if (!s1) revert ApproveFailed();
+        }
     }
 
     /// @notice Safe ETH transfer with failed refund storage
