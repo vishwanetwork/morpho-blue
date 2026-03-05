@@ -84,6 +84,7 @@ contract TwoStepLiquidationTest is BaseTest {
 
     uint256 constant REQUEST_DEPOSIT = 0.1 ether;
     uint256 constant LOCK_DURATION = 1 hours;
+    event RefundClaimed(address indexed owner, address indexed recipient, uint256 amount);
 
     function setUp() public override {
         super.setUp();
@@ -997,5 +998,99 @@ contract TwoStepLiquidationTest is BaseTest {
         tieredMorpho.onMorphoLiquidate(1 ether, "");
     }
 
+    /* ============ 6.12 FIX: FAILED REFUND REDIRECT TESTS ============ */
+
+    function testClaimFailedRefundToAlternateAddress() public {
+        // Simulate a failed refund by directly setting failedRefunds via a cancel scenario
+        // We'll use a contract that rejects ETH as the liquidator
+        ETHRejecter rejecter = new ETHRejecter(address(tieredMorpho), address(whitelistRegistry));
+        whitelistRegistry.addLiquidator(id, address(rejecter));
+
+        uint256 collateralAmount = 10 ether;
+        uint256 borrowAmount = 7 ether;
+        _setupBorrowerPosition(collateralAmount, borrowAmount);
+        oracle.setPrice(ORACLE_PRICE_SCALE * 85 / 100);
+
+        vm.deal(address(rejecter), 1 ether);
+        loanToken.setBalance(address(rejecter), 20 ether);
+
+        // Rejecter requests liquidation
+        rejecter.doRequestLiquidation(marketParams, borrower, 0.5e18, REQUEST_DEPOSIT);
+
+        // Warp past expiry so third party can cancel
+        (,,,,, uint256 expiresAt) = tieredMorpho.getLiquidationRequest(id, borrower);
+        vm.warp(expiresAt + 1);
+
+        // Cancel by third party — refund to rejecter will fail, stored in failedRefunds
+        rejecter.setRejectETH(true);
+        vm.prank(publicLiquidator);
+        tieredMorpho.cancelLiquidationRequest(marketParams, borrower);
+
+        // Verify failedRefunds recorded
+        uint256 pending = tieredMorpho.failedRefunds(address(rejecter));
+        assertEq(pending, REQUEST_DEPOSIT, "Failed refund should be recorded");
+
+        // Original claimFailedRefund would fail for rejecter
+        vm.prank(address(rejecter));
+        vm.expectRevert(TieredLiquidationMorpho.RefundClaimFailed.selector);
+        tieredMorpho.claimFailedRefund();
+
+        // But claimFailedRefundTo with alternate address succeeds
+        address recipient = address(0xBEEF);
+        uint256 recipientBalBefore = recipient.balance;
+
+        vm.expectEmit(true, true, true, true, address(tieredMorpho));
+        emit RefundClaimed(address(rejecter), recipient, REQUEST_DEPOSIT);
+        vm.prank(address(rejecter));
+        tieredMorpho.claimFailedRefundTo(recipient);
+
+        assertEq(recipient.balance - recipientBalBefore, REQUEST_DEPOSIT, "Recipient should receive refund");
+        assertEq(tieredMorpho.failedRefunds(address(rejecter)), 0, "Failed refund should be cleared");
+    }
+
+    function testClaimFailedRefundToZeroAddressReverts() public {
+        vm.prank(publicLiquidator);
+        vm.expectRevert(TieredLiquidationMorpho.InvalidAddress.selector);
+        tieredMorpho.claimFailedRefundTo(address(0));
+    }
+
+    function testClaimFailedRefundToWithNoRefundReverts() public {
+        vm.prank(publicLiquidator);
+        vm.expectRevert(TieredLiquidationMorpho.NoFailedRefund.selector);
+        tieredMorpho.claimFailedRefundTo(address(0xBEEF));
+    }
+
     receive() external payable {}
+}
+
+contract ETHRejecter {
+    TieredLiquidationMorpho public immutable tieredMorpho;
+    WhitelistRegistry public immutable whitelistRegistry;
+    bool public rejectETH;
+
+    constructor(address _tieredMorpho, address _whitelistRegistry) {
+        tieredMorpho = TieredLiquidationMorpho(payable(_tieredMorpho));
+        whitelistRegistry = WhitelistRegistry(_whitelistRegistry);
+    }
+
+    function setRejectETH(bool _reject) external {
+        rejectETH = _reject;
+    }
+
+    function doRequestLiquidation(
+        MarketParams calldata marketParams,
+        address borrower,
+        uint256 liquidationRatio,
+        uint256 depositAmount
+    ) external {
+        (bool s, bytes memory r) = address(marketParams.loanToken).call(
+            abi.encodeWithSignature("approve(address,uint256)", address(tieredMorpho), type(uint256).max)
+        );
+        require(s && (r.length == 0 || abi.decode(r, (bool))), "approve");
+        tieredMorpho.requestLiquidation{value: depositAmount}(marketParams, borrower, liquidationRatio);
+    }
+
+    receive() external payable {
+        if (rejectETH) revert("no ETH");
+    }
 }

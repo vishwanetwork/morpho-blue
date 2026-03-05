@@ -127,7 +127,7 @@ contract TieredLiquidationMorpho is IMorphoLiquidateCallback {
     );
 
     event RefundFailed(address indexed recipient, uint256 amount);
-    event RefundClaimed(address indexed recipient, uint256 amount);
+    event RefundClaimed(address indexed owner, address indexed recipient, uint256 amount);
 
     /* STORAGE */
 
@@ -716,17 +716,16 @@ contract TieredLiquidationMorpho is IMorphoLiquidateCallback {
         emit LiquidationRequestCancelled(marketId, borrower, msg.sender, isExpired);
     }
 
-    /// @notice Claim failed refunds
+    /// @notice Claim failed refunds to msg.sender
     function claimFailedRefund() external nonReentrant {
-        uint256 amount = failedRefunds[msg.sender];
-        if (amount == 0) revert NoFailedRefund();
-        
-        failedRefunds[msg.sender] = 0;
-        
-        (bool success, ) = payable(msg.sender).call{value: amount}("");
-        if (!success) revert RefundClaimFailed();
-        
-        emit RefundClaimed(msg.sender, amount);
+        _claimFailedRefundTo(msg.sender);
+    }
+
+    /// @notice Claim failed refunds to a specified recipient address
+    /// @param recipient The address to receive the refund (must not be zero)
+    function claimFailedRefundTo(address recipient) external nonReentrant {
+        if (recipient == address(0)) revert InvalidAddress();
+        _claimFailedRefundTo(recipient);
     }
 
     /* VIEW FUNCTIONS */
@@ -807,6 +806,19 @@ contract TieredLiquidationMorpho is IMorphoLiquidateCallback {
             s1 = s1 && (r1.length == 0 || abi.decode(r1, (bool)));
             if (!s1) revert ApproveFailed();
         }
+    }
+
+    /// @notice Internal implementation of failed refund claim
+    function _claimFailedRefundTo(address recipient) internal {
+        uint256 amount = failedRefunds[msg.sender];
+        if (amount == 0) revert NoFailedRefund();
+
+        failedRefunds[msg.sender] = 0;
+
+        (bool success, ) = payable(recipient).call{value: amount}("");
+        if (!success) revert RefundClaimFailed();
+
+        emit RefundClaimed(msg.sender, recipient, amount);
     }
 
     /// @notice Safe ETH transfer with failed refund storage
