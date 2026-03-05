@@ -5,8 +5,69 @@ import "../BaseTest.sol";
 import {TieredLiquidationMorpho} from "../../../src/extensions/TieredLiquidationMorpho.sol";
 import {WhitelistRegistry} from "../../../src/extensions/WhitelistRegistry.sol";
 import {MarketParams, Position} from "../../../src/interfaces/IMorpho.sol";
+import {IMorphoLiquidateCallback} from "../../../src/interfaces/IMorphoCallbacks.sol";
 import {MarketParamsLib} from "../../../src/libraries/MarketParamsLib.sol";
 import {SharesMathLib} from "../../../src/libraries/SharesMathLib.sol";
+
+contract LiquidationCallbackReceiver is IMorphoLiquidateCallback {
+    TieredLiquidationMorpho public immutable tieredMorpho;
+    address public immutable loanToken;
+
+    bool public callbackCalled;
+    uint256 public callbackRepaidAssets;
+    bytes public callbackData;
+
+    constructor(address _tieredMorpho, address _loanToken) {
+        tieredMorpho = TieredLiquidationMorpho(payable(_tieredMorpho));
+        loanToken = _loanToken;
+    }
+
+    function liquidateWithCallback(
+        MarketParams calldata marketParams,
+        address borrower,
+        uint256 seizedAssets,
+        bytes calldata data
+    ) external returns (uint256 seized, uint256 repaid) {
+        _approveLoanToken(type(uint256).max);
+        return tieredMorpho.liquidate(marketParams, borrower, seizedAssets, 0, data);
+    }
+
+    function requestLiquidation(MarketParams calldata marketParams, address borrower, uint256 liquidationRatio) external payable {
+        tieredMorpho.requestLiquidation{value: msg.value}(marketParams, borrower, liquidationRatio);
+    }
+
+    function executeLiquidationWithCallback(
+        MarketParams calldata marketParams,
+        address borrower,
+        bytes calldata data
+    ) external returns (uint256 seized, uint256 repaid) {
+        _approveLoanToken(type(uint256).max);
+        return tieredMorpho.executeLiquidation(marketParams, borrower, data);
+    }
+
+    function onMorphoLiquidate(uint256 repaidAssets, bytes calldata data) external override {
+        require(msg.sender == address(tieredMorpho), "not-tiered");
+        callbackCalled = true;
+        callbackRepaidAssets = repaidAssets;
+        callbackData = data;
+    }
+
+    function _approveLoanToken(uint256 amount) internal {
+        (bool s0, bytes memory r0) =
+            loanToken.call(abi.encodeWithSignature("approve(address,uint256)", address(tieredMorpho), uint256(0)));
+        s0 = s0 && (r0.length == 0 || abi.decode(r0, (bool)));
+        require(s0, "approve0");
+
+        if (amount > 0) {
+            (bool s1, bytes memory r1) =
+                loanToken.call(abi.encodeWithSignature("approve(address,uint256)", address(tieredMorpho), amount));
+            s1 = s1 && (r1.length == 0 || abi.decode(r1, (bool)));
+            require(s1, "approve");
+        }
+    }
+
+    receive() external payable {}
+}
 
 /// @title TwoStepLiquidationTest
 /// @notice Tests for hybrid liquidation mode: public one-step + whitelist two-step
@@ -833,6 +894,107 @@ contract TwoStepLiquidationTest is BaseTest {
         // Third party can cancel (expired)
         vm.prank(publicLiquidator);
         tieredMorpho.cancelLiquidationRequest(marketParams, borrower);
+    }
+
+    /* ============ 6.11 FIX: CALLBACK IMPLEMENTATION TESTS ============ */
+
+    function testOneStepLiquidateWithNonEmptyData() public {
+        uint256 collateralAmount = 10 ether;
+        uint256 borrowAmount = 7 ether;
+
+        _setupBorrowerPosition(collateralAmount, borrowAmount);
+        oracle.setPrice(ORACLE_PRICE_SCALE * 85 / 100);
+
+        loanToken.setBalance(publicLiquidator, 20 ether);
+        vm.startPrank(publicLiquidator);
+        loanToken.approve(address(tieredMorpho), type(uint256).max);
+
+        bytes memory callbackData = abi.encode("flash-liquidation");
+        (uint256 seized, uint256 repaid) = tieredMorpho.liquidate(
+            marketParams, borrower, 1 ether, 0, callbackData
+        );
+        vm.stopPrank();
+
+        assertGt(seized, 0, "Should seize with non-empty data");
+        assertGt(repaid, 0, "Should repay with non-empty data");
+    }
+
+    function testTwoStepExecuteWithNonEmptyData() public {
+        uint256 collateralAmount = 10 ether;
+        uint256 borrowAmount = 7 ether;
+
+        _setupBorrowerPosition(collateralAmount, borrowAmount);
+        oracle.setPrice(ORACLE_PRICE_SCALE * 85 / 100);
+
+        vm.deal(liquidator, 1 ether);
+        loanToken.setBalance(liquidator, 20 ether);
+
+        vm.startPrank(liquidator);
+        loanToken.approve(address(tieredMorpho), type(uint256).max);
+        tieredMorpho.requestLiquidation{value: REQUEST_DEPOSIT}(marketParams, borrower, 0.5e18);
+        vm.stopPrank();
+
+        bytes memory callbackData = abi.encode("flash-liquidation");
+        vm.prank(liquidator);
+        (uint256 seized, uint256 repaid) = tieredMorpho.executeLiquidation(marketParams, borrower, callbackData);
+
+        assertGt(seized, 0, "Should seize with non-empty data in two-step");
+        assertGt(repaid, 0, "Should repay with non-empty data in two-step");
+    }
+
+    function testCallbackIsForwardedToOneStepCallerContract() public {
+        uint256 collateralAmount = 10 ether;
+        uint256 borrowAmount = 7 ether;
+
+        _setupBorrowerPosition(collateralAmount, borrowAmount);
+        oracle.setPrice(ORACLE_PRICE_SCALE * 85 / 100);
+
+        LiquidationCallbackReceiver receiver =
+            new LiquidationCallbackReceiver(address(tieredMorpho), marketParams.loanToken);
+        loanToken.setBalance(address(receiver), 20 ether);
+
+        bytes memory callbackData = abi.encode("receiver-callback-one-step");
+        (uint256 seized, uint256 repaid) =
+            receiver.liquidateWithCallback(marketParams, borrower, 1 ether, callbackData);
+
+        assertGt(seized, 0, "One-step should execute");
+        assertGt(repaid, 0, "One-step should repay");
+        assertTrue(receiver.callbackCalled(), "Callback should be forwarded");
+        assertEq(receiver.callbackRepaidAssets(), repaid, "Forwarded repaid amount mismatch");
+        assertEq(keccak256(receiver.callbackData()), keccak256(callbackData), "Forwarded callback data mismatch");
+    }
+
+    function testCallbackIsForwardedToTwoStepExecutorContract() public {
+        uint256 collateralAmount = 10 ether;
+        uint256 borrowAmount = 7 ether;
+
+        _setupBorrowerPosition(collateralAmount, borrowAmount);
+        oracle.setPrice(ORACLE_PRICE_SCALE * 85 / 100);
+
+        LiquidationCallbackReceiver receiver =
+            new LiquidationCallbackReceiver(address(tieredMorpho), marketParams.loanToken);
+        whitelistRegistry.addLiquidator(id, address(receiver));
+
+        vm.deal(address(receiver), 1 ether);
+        loanToken.setBalance(address(receiver), 20 ether);
+
+        receiver.requestLiquidation{value: REQUEST_DEPOSIT}(marketParams, borrower, 0.5e18);
+
+        bytes memory callbackData = abi.encode("receiver-callback-two-step");
+        (uint256 seized, uint256 repaid) =
+            receiver.executeLiquidationWithCallback(marketParams, borrower, callbackData);
+
+        assertGt(seized, 0, "Two-step should execute");
+        assertGt(repaid, 0, "Two-step should repay");
+        assertTrue(receiver.callbackCalled(), "Callback should be forwarded for two-step execute");
+        assertEq(receiver.callbackRepaidAssets(), repaid, "Forwarded two-step repaid amount mismatch");
+        assertEq(keccak256(receiver.callbackData()), keccak256(callbackData), "Forwarded two-step callback data mismatch");
+    }
+
+    function testOnMorphoLiquidateRevertsForNonMorphoCaller() public {
+        vm.prank(publicLiquidator);
+        vm.expectRevert(TieredLiquidationMorpho.Unauthorized.selector);
+        tieredMorpho.onMorphoLiquidate(1 ether, "");
     }
 
     receive() external payable {}

@@ -3,6 +3,7 @@ pragma solidity >=0.8.19 <0.9.0;
 
 import {Id, MarketParams, Position, Market} from "../interfaces/IMorpho.sol";
 import {IMorpho} from "../interfaces/IMorpho.sol";
+import {IMorphoLiquidateCallback} from "../interfaces/IMorphoCallbacks.sol";
 import {IOracle} from "../interfaces/IOracle.sol";
 import {IERC20} from "../interfaces/IERC20.sol";
 
@@ -22,7 +23,7 @@ import {MorphoBalancesLib} from "../libraries/periphery/MorphoBalancesLib.sol";
 /// @notice Enhanced Morpho protocol with flexible liquidation mechanism
 /// @dev Implements hybrid liquidation mode: public one-step + whitelist two-step
 /// @dev Gas optimized version
-contract TieredLiquidationMorpho {
+contract TieredLiquidationMorpho is IMorphoLiquidateCallback {
     using MathLib for uint256;
     using SharesMathLib for uint256;
     using SafeTransferLib for IERC20;
@@ -189,6 +190,9 @@ contract TieredLiquidationMorpho {
 
     /// @notice Failed refunds that can be claimed later
     mapping(address => uint256) public failedRefunds;
+
+    /// @dev Tracks current liquidation caller during Morpho callback window.
+    address private _liquidationCallbackCaller;
 
     /* MODIFIERS */
 
@@ -396,10 +400,12 @@ contract TieredLiquidationMorpho {
         IERC20(loanToken).safeTransferFrom(msg.sender, address(this), estimatedRepayAmount);
         _approveToken(loanToken, address(MORPHO), estimatedRepayAmount);
 
-        // Execute liquidation
+        // Execute liquidation. If data is non-empty, Morpho will callback this contract.
+        if (data.length > 0) _liquidationCallbackCaller = msg.sender;
         (actualSeizedAssets, actualRepaidAssets) = MORPHO.liquidate(
             marketParams, borrower, seizedAssetsToPass, repaidSharesToPass, data
         );
+        if (data.length > 0) _liquidationCallbackCaller = address(0);
 
         // Reset allowance to 0 after use
         _approveToken(loanToken, address(MORPHO), 0);
@@ -620,7 +626,8 @@ contract TieredLiquidationMorpho {
         IERC20(loanToken).safeTransferFrom(msg.sender, address(this), estimatedRepay);
         _approveToken(loanToken, address(MORPHO), estimatedRepay);
 
-        // Execute through Morpho
+        // Execute through Morpho. If data is non-empty, Morpho will callback this contract.
+        if (data.length > 0) _liquidationCallbackCaller = msg.sender;
         (actualSeizedAssets, actualRepaidAssets) = MORPHO.liquidate(
             marketParams,
             borrower,
@@ -628,6 +635,7 @@ contract TieredLiquidationMorpho {
             0,
             data
         );
+        if (data.length > 0) _liquidationCallbackCaller = address(0);
 
         // Reset allowance to 0 after use
         _approveToken(loanToken, address(MORPHO), 0);
@@ -835,6 +843,18 @@ contract TieredLiquidationMorpho {
             MAX_LIQUIDATION_INCENTIVE_FACTOR,
             WAD.wDivDown(WAD - LIQUIDATION_CURSOR.wMulDown(WAD - lltv))
         );
+    }
+
+    /* CALLBACKS */
+
+    /// @inheritdoc IMorphoLiquidateCallback
+    /// @dev Forwards callback to the original liquidation caller so strategy contracts can execute flash logic.
+    function onMorphoLiquidate(uint256 repaidAssets, bytes calldata data) external override {
+        if (msg.sender != address(MORPHO)) revert Unauthorized();
+        address callbackCaller = _liquidationCallbackCaller;
+        if (callbackCaller == address(0)) revert Unauthorized();
+        if (callbackCaller.code.length == 0) return;
+        IMorphoLiquidateCallback(callbackCaller).onMorphoLiquidate(repaidAssets, data);
     }
 
     /// @notice Receive ETH for deposits
