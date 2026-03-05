@@ -551,6 +551,7 @@ contract TieredLiquidationMorpho {
         MarketConfig memory config = marketConfigs[marketId];
 
         if (!config.enabled) revert MarketNotConfigured();
+        if (!config.twoStepLiquidationEnabled) revert TwoStepLiquidationNotEnabled();
 
         LiquidationRequest storage request = liquidationRequests[marketId][borrower];
 

@@ -338,6 +338,110 @@ contract TwoStepLiquidationTest is BaseTest {
         vm.stopPrank();
     }
 
+    function testExecuteFailsWhenMarketDisabledAfterRequest() public {
+        uint256 collateralAmount = 10 ether;
+        uint256 borrowAmount = 7 ether;
+
+        _setupBorrowerPosition(collateralAmount, borrowAmount);
+        oracle.setPrice(ORACLE_PRICE_SCALE * 85 / 100);
+
+        vm.deal(liquidator, 1 ether);
+        loanToken.setBalance(liquidator, 20 ether);
+
+        vm.startPrank(liquidator);
+        loanToken.approve(address(tieredMorpho), type(uint256).max);
+        tieredMorpho.requestLiquidation{value: REQUEST_DEPOSIT}(marketParams, borrower, 0.5e18);
+        vm.stopPrank();
+
+        // Admin disables market: pending requests must no longer execute.
+        tieredMorpho.configureMarket(
+            id,
+            false,          // enabled
+            WAD,            // maxLiquidationRatio
+            0,              // cooldownPeriod
+            0,              // minSeizedAssets
+            true,           // publicLiquidationEnabled
+            true,           // twoStepLiquidationEnabled
+            LOCK_DURATION,
+            REQUEST_DEPOSIT,
+            0.5e18
+        );
+
+        vm.prank(liquidator);
+        vm.expectRevert(TieredLiquidationMorpho.MarketNotConfigured.selector);
+        tieredMorpho.executeLiquidation(marketParams, borrower, "");
+    }
+
+    function testCanCancelPendingRequestAfterMarketDisabled() public {
+        uint256 collateralAmount = 10 ether;
+        uint256 borrowAmount = 7 ether;
+
+        _setupBorrowerPosition(collateralAmount, borrowAmount);
+        oracle.setPrice(ORACLE_PRICE_SCALE * 85 / 100);
+
+        vm.deal(liquidator, 1 ether);
+        loanToken.setBalance(liquidator, 20 ether);
+        uint256 liquidatorEthBefore = liquidator.balance;
+
+        vm.startPrank(liquidator);
+        loanToken.approve(address(tieredMorpho), type(uint256).max);
+        tieredMorpho.requestLiquidation{value: REQUEST_DEPOSIT}(marketParams, borrower, 0.5e18);
+        vm.stopPrank();
+
+        // Admin disables market: liquidator should still be able to cancel and recover deposit.
+        tieredMorpho.configureMarket(
+            id,
+            false,          // enabled
+            WAD,            // maxLiquidationRatio
+            0,              // cooldownPeriod
+            0,              // minSeizedAssets
+            true,           // publicLiquidationEnabled
+            true,           // twoStepLiquidationEnabled
+            LOCK_DURATION,
+            REQUEST_DEPOSIT,
+            0.5e18
+        );
+
+        vm.prank(liquidator);
+        tieredMorpho.cancelLiquidationRequest(marketParams, borrower);
+
+        assertEq(liquidator.balance, liquidatorEthBefore, "Deposit should be refunded after cancel");
+    }
+
+    function testExecuteFailsWhenTwoStepDisabledAfterRequest() public {
+        uint256 collateralAmount = 10 ether;
+        uint256 borrowAmount = 7 ether;
+
+        _setupBorrowerPosition(collateralAmount, borrowAmount);
+        oracle.setPrice(ORACLE_PRICE_SCALE * 85 / 100);
+
+        vm.deal(liquidator, 1 ether);
+        loanToken.setBalance(liquidator, 20 ether);
+
+        vm.startPrank(liquidator);
+        loanToken.approve(address(tieredMorpho), type(uint256).max);
+        tieredMorpho.requestLiquidation{value: REQUEST_DEPOSIT}(marketParams, borrower, 0.5e18);
+        vm.stopPrank();
+
+        // Keep market enabled but disable two-step mode.
+        tieredMorpho.configureMarket(
+            id,
+            true,           // enabled
+            WAD,            // maxLiquidationRatio
+            0,              // cooldownPeriod
+            0,              // minSeizedAssets
+            true,           // publicLiquidationEnabled
+            false,          // twoStepLiquidationEnabled
+            0,              // lockDuration ignored when two-step disabled
+            REQUEST_DEPOSIT,
+            0.5e18
+        );
+
+        vm.prank(liquidator);
+        vm.expectRevert(TieredLiquidationMorpho.TwoStepLiquidationNotEnabled.selector);
+        tieredMorpho.executeLiquidation(marketParams, borrower, "");
+    }
+
     /* ============ CANCEL REQUEST TESTS ============ */
 
     function testCancelRequestByLiquidator() public {
