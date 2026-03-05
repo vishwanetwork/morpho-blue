@@ -158,6 +158,8 @@ contract TieredLiquidationMorpho {
         // New slot
         uint128 liquidationRatio;        // 16 bytes - sufficient for WAD precision
         uint128 depositAmount;           // 16 bytes - sufficient for ETH amounts
+        // 6.9 fix: snapshot expiresAt at creation time so lockDuration changes don't retroact
+        uint64 expiresAt;                // 8 bytes
     }
 
     /// @notice The underlying Morpho protocol
@@ -310,11 +312,7 @@ contract TieredLiquidationMorpho {
         {
             LiquidationRequest storage request = liquidationRequests[marketId][borrower];
             if (request.status == LiquidationStatus.Pending) {
-                uint256 expiresAt;
-                unchecked {
-                    expiresAt = uint256(request.requestTimestamp) + config.lockDuration;
-                }
-                if (block.timestamp < expiresAt) {
+                if (block.timestamp < uint256(request.expiresAt)) {
                     revert LiquidationRequestLocked();
                 }
                 _clearExpiredRequest(marketId, borrower, request);
@@ -476,11 +474,7 @@ contract TieredLiquidationMorpho {
         // Check existing request
         LiquidationRequest storage existingRequest = liquidationRequests[marketId][borrower];
         if (existingRequest.status == LiquidationStatus.Pending) {
-            uint256 requestExpiresAt;
-            unchecked {
-                requestExpiresAt = uint256(existingRequest.requestTimestamp) + config.lockDuration;
-            }
-            if (block.timestamp < requestExpiresAt) {
+            if (block.timestamp < uint256(existingRequest.expiresAt)) {
                 revert LiquidationRequestLocked();
             }
             _clearExpiredRequest(marketId, borrower, existingRequest);
@@ -530,19 +524,20 @@ contract TieredLiquidationMorpho {
 
         requestedRepaidAssets = debtToRepay;
 
-        // Store request with packed struct
+        // Store request with expiresAt snapshot (6.9 fix)
+        uint256 expiresAt;
+        unchecked {
+            expiresAt = block.timestamp + config.lockDuration;
+        }
+
         liquidationRequests[marketId][borrower] = LiquidationRequest({
             liquidator: msg.sender,
             requestTimestamp: uint64(block.timestamp),
             status: LiquidationStatus.Pending,
             liquidationRatio: uint128(liquidationRatio),
-            depositAmount: uint128(msg.value)
+            depositAmount: uint128(msg.value),
+            expiresAt: uint64(expiresAt)
         });
-
-        uint256 expiresAt;
-        unchecked {
-            expiresAt = block.timestamp + config.lockDuration;
-        }
 
         emit LiquidationRequested(
             marketId,
@@ -576,12 +571,8 @@ contract TieredLiquidationMorpho {
             revert NotLiquidator();
         }
 
-        // Check time window
-        uint256 expiresAt;
-        unchecked {
-            expiresAt = uint256(request.requestTimestamp) + config.lockDuration;
-        }
-        if (block.timestamp > expiresAt) {
+        // Check time window (uses snapshot expiresAt, immune to lockDuration changes)
+        if (block.timestamp > uint256(request.expiresAt)) {
             revert LiquidationRequestExpired();
         }
 
@@ -695,12 +686,7 @@ contract TieredLiquidationMorpho {
             revert NoActiveRequest();
         }
 
-        MarketConfig memory config = marketConfigs[marketId];
-        uint256 expiresAt;
-        unchecked {
-            expiresAt = uint256(request.requestTimestamp) + config.lockDuration;
-        }
-        bool isExpired = block.timestamp > expiresAt;
+        bool isExpired = block.timestamp > uint256(request.expiresAt);
 
         if (!isExpired && msg.sender != request.liquidator) {
             revert RequestNotExpired();
@@ -771,11 +757,6 @@ contract TieredLiquidationMorpho {
         )
     {
         LiquidationRequest storage request = liquidationRequests[marketId][borrower];
-        MarketConfig storage config = marketConfigs[marketId];
-        
-        unchecked {
-            expiresAt = uint256(request.requestTimestamp) + config.lockDuration;
-        }
         
         return (
             request.liquidator,
@@ -783,7 +764,7 @@ contract TieredLiquidationMorpho {
             uint256(request.liquidationRatio),
             uint256(request.depositAmount),
             request.status,
-            expiresAt
+            uint256(request.expiresAt)
         );
     }
 

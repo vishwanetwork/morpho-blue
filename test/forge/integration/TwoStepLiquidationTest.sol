@@ -624,5 +624,94 @@ contract TwoStepLiquidationTest is BaseTest {
         assertTrue(tieredMorpho.canLiquidateTwoStep(id, liquidator), "Whitelist should still be able to two-step");
     }
 
+    /* ============ 6.9 FIX: LOCK DURATION CHANGE TESTS ============ */
+
+    function testLockDurationChangeDoesNotAffectExistingRequest() public {
+        uint256 collateralAmount = 10 ether;
+        uint256 borrowAmount = 7 ether;
+
+        _setupBorrowerPosition(collateralAmount, borrowAmount);
+        oracle.setPrice(ORACLE_PRICE_SCALE * 85 / 100);
+
+        vm.deal(liquidator, 1 ether);
+        loanToken.setBalance(liquidator, 20 ether);
+
+        vm.startPrank(liquidator);
+        loanToken.approve(address(tieredMorpho), type(uint256).max);
+        tieredMorpho.requestLiquidation{value: REQUEST_DEPOSIT}(marketParams, borrower, 0.5e18);
+        vm.stopPrank();
+
+        // Verify expiresAt is based on original lockDuration (1 hour)
+        (,,,,, uint256 originalExpiresAt) = tieredMorpho.getLiquidationRequest(id, borrower);
+        assertEq(originalExpiresAt, block.timestamp + LOCK_DURATION, "expiresAt should use original lockDuration");
+
+        // Admin doubles the lockDuration to 2 hours
+        tieredMorpho.configureMarket(
+            id,
+            true,
+            WAD,
+            0,
+            0,
+            true,
+            true,
+            true,
+            LOCK_DURATION * 2,  // doubled
+            REQUEST_DEPOSIT,
+            0.5e18
+        );
+
+        // expiresAt should remain unchanged
+        (,,,,, uint256 afterChangeExpiresAt) = tieredMorpho.getLiquidationRequest(id, borrower);
+        assertEq(afterChangeExpiresAt, originalExpiresAt, "expiresAt must NOT change when lockDuration is updated");
+
+        // Liquidator can still execute within original window
+        vm.prank(liquidator);
+        (uint256 seized, uint256 repaid) = tieredMorpho.executeLiquidation(marketParams, borrower, "");
+
+        assertGt(repaid, 0, "Should execute with original expiresAt");
+        assertGt(seized, 0, "Should seize collateral");
+    }
+
+    function testReducedLockDurationDoesNotExpireExistingRequest() public {
+        uint256 collateralAmount = 10 ether;
+        uint256 borrowAmount = 7 ether;
+
+        _setupBorrowerPosition(collateralAmount, borrowAmount);
+        oracle.setPrice(ORACLE_PRICE_SCALE * 85 / 100);
+
+        vm.deal(liquidator, 1 ether);
+        loanToken.setBalance(liquidator, 20 ether);
+
+        vm.startPrank(liquidator);
+        loanToken.approve(address(tieredMorpho), type(uint256).max);
+        tieredMorpho.requestLiquidation{value: REQUEST_DEPOSIT}(marketParams, borrower, 0.5e18);
+        vm.stopPrank();
+
+        // Admin reduces lockDuration to 1 second
+        tieredMorpho.configureMarket(
+            id,
+            true,
+            WAD,
+            0,
+            0,
+            true,
+            true,
+            true,
+            1,              // reduced to 1 second
+            REQUEST_DEPOSIT,
+            0.5e18
+        );
+
+        // Wait 2 seconds — would be expired under new config, but NOT under snapshot
+        vm.warp(block.timestamp + 2);
+
+        // Request should still be valid (expiresAt was snapshot at original lockDuration)
+        vm.prank(liquidator);
+        (uint256 seized, uint256 repaid) = tieredMorpho.executeLiquidation(marketParams, borrower, "");
+
+        assertGt(repaid, 0, "Should NOT expire under reduced lockDuration");
+        assertGt(seized, 0, "Should seize collateral");
+    }
+
     receive() external payable {}
 }
