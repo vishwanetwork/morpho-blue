@@ -41,6 +41,7 @@ contract TieredLiquidationMorpho is ReentrancyGuard {
     error InvalidLiquidationRatio();
     error PublicLiquidationNotEnabled();
     error TwoStepLiquidationNotEnabled();
+    error OneStepLiquidationNotEnabled();
     error LiquidationRequestLocked();
     error LiquidationRequestExpired();
     error InsufficientDeposit();
@@ -86,6 +87,7 @@ contract TieredLiquidationMorpho is ReentrancyGuard {
     struct MarketConfig {
         bool enabled;
         bool publicLiquidationEnabled;
+        bool oneStepLiquidationEnabled;
         bool twoStepLiquidationEnabled;
         uint256 maxLiquidationRatio;
         uint256 cooldownPeriod;
@@ -166,6 +168,7 @@ contract TieredLiquidationMorpho is ReentrancyGuard {
         uint256 cooldownPeriod,
         uint256 minSeizedAssets,
         bool publicLiquidationEnabled,
+        bool oneStepLiquidationEnabled,
         bool twoStepLiquidationEnabled,
         uint256 lockDuration,
         uint256 requestDeposit,
@@ -173,12 +176,13 @@ contract TieredLiquidationMorpho is ReentrancyGuard {
     ) external onlyOwner {
         if (maxLiquidationRatio > WAD) revert RatioExceeds100();
         if (protocolFee > WAD) revert ProtocolFeeTooHigh();
-        if (enabled && !publicLiquidationEnabled && !twoStepLiquidationEnabled) revert AtLeastOneModeRequired();
+        if (enabled && !oneStepLiquidationEnabled && !twoStepLiquidationEnabled) revert AtLeastOneModeRequired();
         if (twoStepLiquidationEnabled && lockDuration == 0) revert LockDurationRequired();
 
         marketConfigs[marketId] = MarketConfig({
             enabled: enabled,
             publicLiquidationEnabled: publicLiquidationEnabled,
+            oneStepLiquidationEnabled: oneStepLiquidationEnabled,
             twoStepLiquidationEnabled: twoStepLiquidationEnabled,
             maxLiquidationRatio: maxLiquidationRatio,
             cooldownPeriod: cooldownPeriod,
@@ -204,6 +208,7 @@ contract TieredLiquidationMorpho is ReentrancyGuard {
         if (!config.enabled) revert MarketNotConfigured();
 
         bool isWhitelisted = WHITELIST_REGISTRY.canLiquidate(marketId, msg.sender);
+        if (!config.oneStepLiquidationEnabled) revert OneStepLiquidationNotEnabled();
         if (!config.publicLiquidationEnabled && !isWhitelisted) revert PublicLiquidationNotEnabled();
 
         _enforceNoActiveLock(marketId, borrower, config.lockDuration);
