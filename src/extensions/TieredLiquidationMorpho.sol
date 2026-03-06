@@ -318,7 +318,7 @@ contract TieredLiquidationMorpho is ReentrancyGuard {
         if (!WHITELIST_REGISTRY.canLiquidate(marketId, msg.sender)) revert Unauthorized();
 
         uint256 expiresAt = uint256(request.expiresAt);
-        if (block.timestamp > expiresAt) revert LiquidationRequestExpired();
+        if (block.timestamp >= expiresAt) revert LiquidationRequestExpired();
 
         uint256 storedRatio = uint256(request.liquidationRatio);
         uint256 depositToRefund = uint256(request.depositAmount);
@@ -359,7 +359,7 @@ contract TieredLiquidationMorpho is ReentrancyGuard {
         if (request.status != LiquidationStatus.Pending) revert NoActiveRequest();
 
         uint256 expiresAt = uint256(request.expiresAt);
-        bool isExpired = block.timestamp > expiresAt;
+        bool isExpired = block.timestamp >= expiresAt;
         if (!isExpired && msg.sender != request.liquidator) revert RequestNotExpired();
 
         address originalLiquidator = request.liquidator;
