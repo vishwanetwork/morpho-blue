@@ -201,8 +201,7 @@ contract TieredLiquidationMorpho is ReentrancyGuard {
         MarketParams calldata marketParams,
         address borrower,
         uint256 seizedAssets,
-        uint256 repaidShares,
-        bytes calldata data
+        uint256 repaidShares
     ) external nonReentrant returns (uint256 actualSeizedAssets, uint256 actualRepaidAssets) {
         Id marketId = marketParams.id();
         MarketConfig memory config = marketConfigs[marketId];
@@ -248,7 +247,7 @@ contract TieredLiquidationMorpho is ReentrancyGuard {
         }
 
         (actualSeizedAssets, actualRepaidAssets) = _executeMorphoLiquidation(
-            marketParams, borrower, seizedAssetsToPass, repaidSharesToPass, estimatedRepay, data
+            marketParams, borrower, seizedAssetsToPass, repaidSharesToPass, estimatedRepay, ""
         );
 
         actualSeizedAssets = _deductProtocolFee(marketId, actualSeizedAssets, config, pd.liquidationIncentiveFactor);
@@ -305,8 +304,7 @@ contract TieredLiquidationMorpho is ReentrancyGuard {
     /// @notice Step 2: Execute the locked liquidation
     function executeLiquidation(
         MarketParams calldata marketParams,
-        address borrower,
-        bytes calldata data
+        address borrower
     ) external nonReentrant returns (uint256 actualSeizedAssets, uint256 actualRepaidAssets) {
         Id marketId = marketParams.id();
         MarketConfig memory config = marketConfigs[marketId];
@@ -337,7 +335,7 @@ contract TieredLiquidationMorpho is ReentrancyGuard {
         if (totalSeized > pos.collateral) revert InsufficientCollateral();
 
         (actualSeizedAssets, actualRepaidAssets) = _executeMorphoLiquidation(
-            marketParams, borrower, totalSeized, 0, debtToRepay * 12 / 10, data
+            marketParams, borrower, totalSeized, 0, debtToRepay * 12 / 10, ""
         );
 
         uint256 liquidatorShare = _deductProtocolFee(marketId, actualSeizedAssets, config, lif);
