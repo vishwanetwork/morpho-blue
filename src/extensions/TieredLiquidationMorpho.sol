@@ -367,13 +367,13 @@ contract TieredLiquidationMorpho is ReentrancyGuard {
         emit LiquidationRequestCancelled(marketId, borrower, msg.sender, isExpired);
     }
 
-    function claimFailedRefund() external nonReentrant {
+    function claimFailedRefund(address payable recipient) external nonReentrant {
         uint256 amount = failedRefunds[msg.sender];
         if (amount == 0) revert NoFailedRefund();
         failedRefunds[msg.sender] = 0;
-        (bool success, ) = payable(msg.sender).call{value: amount}("");
+        (bool success, ) = recipient.call{value: amount}("");
         if (!success) revert RefundClaimFailed();
-        emit RefundClaimed(msg.sender, amount);
+        emit RefundClaimed(recipient, amount);
     }
 
     /* ── View Functions ────────────────────────────────────── */
