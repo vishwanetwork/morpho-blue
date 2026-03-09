@@ -5,8 +5,69 @@ import "../BaseTest.sol";
 import {TieredLiquidationMorpho} from "../../../src/extensions/TieredLiquidationMorpho.sol";
 import {WhitelistRegistry} from "../../../src/extensions/WhitelistRegistry.sol";
 import {MarketParams, Position} from "../../../src/interfaces/IMorpho.sol";
+import {IMorphoLiquidateCallback} from "../../../src/interfaces/IMorphoCallbacks.sol";
 import {MarketParamsLib} from "../../../src/libraries/MarketParamsLib.sol";
 import {SharesMathLib} from "../../../src/libraries/SharesMathLib.sol";
+
+contract LiquidationCallbackReceiver is IMorphoLiquidateCallback {
+    TieredLiquidationMorpho public immutable tieredMorpho;
+    address public immutable loanToken;
+
+    bool public callbackCalled;
+    uint256 public callbackRepaidAssets;
+    bytes public callbackData;
+
+    constructor(address _tieredMorpho, address _loanToken) {
+        tieredMorpho = TieredLiquidationMorpho(payable(_tieredMorpho));
+        loanToken = _loanToken;
+    }
+
+    function liquidateWithCallback(
+        MarketParams calldata marketParams,
+        address borrower,
+        uint256 seizedAssets,
+        bytes calldata data
+    ) external returns (uint256 seized, uint256 repaid) {
+        _approveLoanToken(type(uint256).max);
+        return tieredMorpho.liquidate(marketParams, borrower, seizedAssets, 0, data);
+    }
+
+    function requestLiquidation(MarketParams calldata marketParams, address borrower, uint256 liquidationRatio) external payable {
+        tieredMorpho.requestLiquidation{value: msg.value}(marketParams, borrower, liquidationRatio);
+    }
+
+    function executeLiquidationWithCallback(
+        MarketParams calldata marketParams,
+        address borrower,
+        bytes calldata data
+    ) external returns (uint256 seized, uint256 repaid) {
+        _approveLoanToken(type(uint256).max);
+        return tieredMorpho.executeLiquidation(marketParams, borrower, data);
+    }
+
+    function onMorphoLiquidate(uint256 repaidAssets, bytes calldata data) external override {
+        require(msg.sender == address(tieredMorpho), "not-tiered");
+        callbackCalled = true;
+        callbackRepaidAssets = repaidAssets;
+        callbackData = data;
+    }
+
+    function _approveLoanToken(uint256 amount) internal {
+        (bool s0, bytes memory r0) =
+            loanToken.call(abi.encodeWithSignature("approve(address,uint256)", address(tieredMorpho), uint256(0)));
+        s0 = s0 && (r0.length == 0 || abi.decode(r0, (bool)));
+        require(s0, "approve0");
+
+        if (amount > 0) {
+            (bool s1, bytes memory r1) =
+                loanToken.call(abi.encodeWithSignature("approve(address,uint256)", address(tieredMorpho), amount));
+            s1 = s1 && (r1.length == 0 || abi.decode(r1, (bool)));
+            require(s1, "approve");
+        }
+    }
+
+    receive() external payable {}
+}
 
 /// @title TwoStepLiquidationTest
 /// @notice Tests for hybrid liquidation mode: public one-step + whitelist two-step
@@ -23,6 +84,7 @@ contract TwoStepLiquidationTest is BaseTest {
 
     uint256 constant REQUEST_DEPOSIT = 0.1 ether;
     uint256 constant LOCK_DURATION = 1 hours;
+    event RefundClaimed(address indexed owner, address indexed recipient, uint256 amount);
 
     function setUp() public override {
         super.setUp();
@@ -36,24 +98,27 @@ contract TwoStepLiquidationTest is BaseTest {
         // - 10% liquidation bonus
         // - 1 hour lock duration for two-step
         // - 0.1 ETH deposit required for two-step
+        // 6.1 fix: register extension in Morpho core before configuring market
+        vm.prank(OWNER);
+        Morpho(address(morpho)).setLiquidationExtension(id, address(tieredMorpho));
+
         tieredMorpho.configureMarket(
             id,
             true,           // enabled
-            0.1e18,         // liquidationBonus (10%)
             WAD,            // maxLiquidationRatio (100%)
             0,              // cooldownPeriod (no cooldown)
             0,              // minSeizedAssets (no minimum)
             true,           // publicLiquidationEnabled
             true,           // twoStepLiquidationEnabled
+            true,           // whitelistOneStepEnabled
             LOCK_DURATION,  // lockDuration
             REQUEST_DEPOSIT,// requestDeposit
             0.5e18          // protocolFee (50%)
         );
 
-        // Setup whitelist
+        // Setup whitelist (initializeMarket now auto-enables whitelist)
         whitelistRegistry.initializeMarket(id, address(this));
         whitelistRegistry.addLiquidator(id, liquidator);
-        whitelistRegistry.setWhitelistMode(id, true);
 
         // Fund the contract for potential refunds
         vm.deal(address(this), 10 ether);
@@ -107,12 +172,12 @@ contract TwoStepLiquidationTest is BaseTest {
         tieredMorpho.configureMarket(
             id,
             true,           // enabled
-            0.1e18,         // liquidationBonus
             WAD,            // maxLiquidationRatio
             0,              // cooldownPeriod
             0,              // minSeizedAssets
             false,          // publicLiquidationEnabled = false
             true,           // twoStepLiquidationEnabled
+            false,          // whitelistOneStepEnabled = false (force two-step)
             LOCK_DURATION,
             REQUEST_DEPOSIT,
             0.5e18
@@ -336,6 +401,113 @@ contract TwoStepLiquidationTest is BaseTest {
         vm.stopPrank();
     }
 
+    function testExecuteFailsWhenMarketDisabledAfterRequest() public {
+        uint256 collateralAmount = 10 ether;
+        uint256 borrowAmount = 7 ether;
+
+        _setupBorrowerPosition(collateralAmount, borrowAmount);
+        oracle.setPrice(ORACLE_PRICE_SCALE * 85 / 100);
+
+        vm.deal(liquidator, 1 ether);
+        loanToken.setBalance(liquidator, 20 ether);
+
+        vm.startPrank(liquidator);
+        loanToken.approve(address(tieredMorpho), type(uint256).max);
+        tieredMorpho.requestLiquidation{value: REQUEST_DEPOSIT}(marketParams, borrower, 0.5e18);
+        vm.stopPrank();
+
+        // Admin disables market: pending requests must no longer execute.
+        tieredMorpho.configureMarket(
+            id,
+            false,          // enabled
+            WAD,            // maxLiquidationRatio
+            0,              // cooldownPeriod
+            0,              // minSeizedAssets
+            true,           // publicLiquidationEnabled
+            true,           // twoStepLiquidationEnabled
+            true,           // whitelistOneStepEnabled
+            LOCK_DURATION,
+            REQUEST_DEPOSIT,
+            0.5e18
+        );
+
+        vm.prank(liquidator);
+        vm.expectRevert(TieredLiquidationMorpho.MarketNotConfigured.selector);
+        tieredMorpho.executeLiquidation(marketParams, borrower, "");
+    }
+
+    function testCanCancelPendingRequestAfterMarketDisabled() public {
+        uint256 collateralAmount = 10 ether;
+        uint256 borrowAmount = 7 ether;
+
+        _setupBorrowerPosition(collateralAmount, borrowAmount);
+        oracle.setPrice(ORACLE_PRICE_SCALE * 85 / 100);
+
+        vm.deal(liquidator, 1 ether);
+        loanToken.setBalance(liquidator, 20 ether);
+        uint256 liquidatorEthBefore = liquidator.balance;
+
+        vm.startPrank(liquidator);
+        loanToken.approve(address(tieredMorpho), type(uint256).max);
+        tieredMorpho.requestLiquidation{value: REQUEST_DEPOSIT}(marketParams, borrower, 0.5e18);
+        vm.stopPrank();
+
+        // Admin disables market: liquidator should still be able to cancel and recover deposit.
+        tieredMorpho.configureMarket(
+            id,
+            false,          // enabled
+            WAD,            // maxLiquidationRatio
+            0,              // cooldownPeriod
+            0,              // minSeizedAssets
+            true,           // publicLiquidationEnabled
+            true,           // twoStepLiquidationEnabled
+            true,           // whitelistOneStepEnabled
+            LOCK_DURATION,
+            REQUEST_DEPOSIT,
+            0.5e18
+        );
+
+        vm.prank(liquidator);
+        tieredMorpho.cancelLiquidationRequest(marketParams, borrower);
+
+        assertEq(liquidator.balance, liquidatorEthBefore, "Deposit should be refunded after cancel");
+    }
+
+    function testExecuteFailsWhenTwoStepDisabledAfterRequest() public {
+        uint256 collateralAmount = 10 ether;
+        uint256 borrowAmount = 7 ether;
+
+        _setupBorrowerPosition(collateralAmount, borrowAmount);
+        oracle.setPrice(ORACLE_PRICE_SCALE * 85 / 100);
+
+        vm.deal(liquidator, 1 ether);
+        loanToken.setBalance(liquidator, 20 ether);
+
+        vm.startPrank(liquidator);
+        loanToken.approve(address(tieredMorpho), type(uint256).max);
+        tieredMorpho.requestLiquidation{value: REQUEST_DEPOSIT}(marketParams, borrower, 0.5e18);
+        vm.stopPrank();
+
+        // Keep market enabled but disable two-step mode.
+        tieredMorpho.configureMarket(
+            id,
+            true,           // enabled
+            WAD,            // maxLiquidationRatio
+            0,              // cooldownPeriod
+            0,              // minSeizedAssets
+            true,           // publicLiquidationEnabled
+            false,          // twoStepLiquidationEnabled
+            true,           // whitelistOneStepEnabled
+            0,              // lockDuration ignored when two-step disabled
+            REQUEST_DEPOSIT,
+            0.5e18
+        );
+
+        vm.prank(liquidator);
+        vm.expectRevert(TieredLiquidationMorpho.TwoStepLiquidationNotEnabled.selector);
+        tieredMorpho.executeLiquidation(marketParams, borrower, "");
+    }
+
     /* ============ CANCEL REQUEST TESTS ============ */
 
     function testCancelRequestByLiquidator() public {
@@ -440,6 +612,50 @@ contract TwoStepLiquidationTest is BaseTest {
         assertGt(seized, 0, "Should seize collateral");
     }
 
+    function testWhitelistOneStepBlockedWhenDisabled() public {
+        // 6.8 fix: disable whitelist one-step so whitelisted users must use two-step
+        tieredMorpho.configureMarket(
+            id,
+            true,           // enabled
+            WAD,            // maxLiquidationRatio
+            0,              // cooldownPeriod
+            0,              // minSeizedAssets
+            false,          // publicLiquidationEnabled
+            true,           // twoStepLiquidationEnabled
+            false,          // whitelistOneStepEnabled = false
+            LOCK_DURATION,
+            REQUEST_DEPOSIT,
+            0.5e18
+        );
+
+        uint256 collateralAmount = 10 ether;
+        uint256 borrowAmount = 7 ether;
+
+        _setupBorrowerPosition(collateralAmount, borrowAmount);
+        oracle.setPrice(ORACLE_PRICE_SCALE * 85 / 100);
+
+        vm.deal(liquidator, 1 ether);
+        loanToken.setBalance(liquidator, 20 ether);
+
+        vm.startPrank(liquidator);
+        loanToken.approve(address(tieredMorpho), type(uint256).max);
+
+        // Whitelisted user should be blocked from one-step when whitelistOneStepEnabled = false
+        vm.expectRevert(TieredLiquidationMorpho.WhitelistOneStepNotEnabled.selector);
+        tieredMorpho.liquidate(marketParams, borrower, 1 ether, 0, "");
+        vm.stopPrank();
+
+        // But whitelisted user can still use two-step
+        vm.startPrank(liquidator);
+        tieredMorpho.requestLiquidation{value: REQUEST_DEPOSIT}(marketParams, borrower, 0.5e18);
+
+        (uint256 actualSeized, uint256 actualRepaid) = tieredMorpho.executeLiquidation(marketParams, borrower, "");
+        vm.stopPrank();
+
+        assertGt(actualRepaid, 0, "Whitelist user should be able to use two-step");
+        assertGt(actualSeized, 0, "Should seize collateral via two-step");
+    }
+
     function testViewFunctions() public {
         // Test canLiquidateOneStep
         assertTrue(tieredMorpho.canLiquidateOneStep(id, publicLiquidator), "Public should be able to one-step");
@@ -450,5 +666,431 @@ contract TwoStepLiquidationTest is BaseTest {
         assertTrue(tieredMorpho.canLiquidateTwoStep(id, liquidator), "Whitelist should be able to two-step");
     }
 
+    function testViewFunctionsWhitelistOneStepDisabled() public {
+        // Disable whitelist one-step
+        tieredMorpho.configureMarket(
+            id,
+            true,           // enabled
+            WAD,
+            0,
+            0,
+            false,          // publicLiquidationEnabled
+            true,           // twoStepLiquidationEnabled
+            false,          // whitelistOneStepEnabled = false
+            LOCK_DURATION,
+            REQUEST_DEPOSIT,
+            0.5e18
+        );
+
+        assertFalse(tieredMorpho.canLiquidateOneStep(id, liquidator), "Whitelist should NOT be able to one-step when disabled");
+        assertTrue(tieredMorpho.canLiquidateTwoStep(id, liquidator), "Whitelist should still be able to two-step");
+    }
+
+    /* ============ 6.9 FIX: LOCK DURATION CHANGE TESTS ============ */
+
+    function testLockDurationChangeDoesNotAffectExistingRequest() public {
+        uint256 collateralAmount = 10 ether;
+        uint256 borrowAmount = 7 ether;
+
+        _setupBorrowerPosition(collateralAmount, borrowAmount);
+        oracle.setPrice(ORACLE_PRICE_SCALE * 85 / 100);
+
+        vm.deal(liquidator, 1 ether);
+        loanToken.setBalance(liquidator, 20 ether);
+
+        vm.startPrank(liquidator);
+        loanToken.approve(address(tieredMorpho), type(uint256).max);
+        tieredMorpho.requestLiquidation{value: REQUEST_DEPOSIT}(marketParams, borrower, 0.5e18);
+        vm.stopPrank();
+
+        // Verify expiresAt is based on original lockDuration (1 hour)
+        (,,,,, uint256 originalExpiresAt) = tieredMorpho.getLiquidationRequest(id, borrower);
+        assertEq(originalExpiresAt, block.timestamp + LOCK_DURATION, "expiresAt should use original lockDuration");
+
+        // Admin doubles the lockDuration to 2 hours
+        tieredMorpho.configureMarket(
+            id,
+            true,
+            WAD,
+            0,
+            0,
+            true,
+            true,
+            true,
+            LOCK_DURATION * 2,  // doubled
+            REQUEST_DEPOSIT,
+            0.5e18
+        );
+
+        // expiresAt should remain unchanged
+        (,,,,, uint256 afterChangeExpiresAt) = tieredMorpho.getLiquidationRequest(id, borrower);
+        assertEq(afterChangeExpiresAt, originalExpiresAt, "expiresAt must NOT change when lockDuration is updated");
+
+        // Liquidator can still execute within original window
+        vm.prank(liquidator);
+        (uint256 seized, uint256 repaid) = tieredMorpho.executeLiquidation(marketParams, borrower, "");
+
+        assertGt(repaid, 0, "Should execute with original expiresAt");
+        assertGt(seized, 0, "Should seize collateral");
+    }
+
+    function testReducedLockDurationDoesNotExpireExistingRequest() public {
+        uint256 collateralAmount = 10 ether;
+        uint256 borrowAmount = 7 ether;
+
+        _setupBorrowerPosition(collateralAmount, borrowAmount);
+        oracle.setPrice(ORACLE_PRICE_SCALE * 85 / 100);
+
+        vm.deal(liquidator, 1 ether);
+        loanToken.setBalance(liquidator, 20 ether);
+
+        vm.startPrank(liquidator);
+        loanToken.approve(address(tieredMorpho), type(uint256).max);
+        tieredMorpho.requestLiquidation{value: REQUEST_DEPOSIT}(marketParams, borrower, 0.5e18);
+        vm.stopPrank();
+
+        // Admin reduces lockDuration to 1 second
+        tieredMorpho.configureMarket(
+            id,
+            true,
+            WAD,
+            0,
+            0,
+            true,
+            true,
+            true,
+            1,              // reduced to 1 second
+            REQUEST_DEPOSIT,
+            0.5e18
+        );
+
+        // Wait 2 seconds — would be expired under new config, but NOT under snapshot
+        vm.warp(block.timestamp + 2);
+
+        // Request should still be valid (expiresAt was snapshot at original lockDuration)
+        vm.prank(liquidator);
+        (uint256 seized, uint256 repaid) = tieredMorpho.executeLiquidation(marketParams, borrower, "");
+
+        assertGt(repaid, 0, "Should NOT expire under reduced lockDuration");
+        assertGt(seized, 0, "Should seize collateral");
+    }
+
+    function testRequestRevertsWhenExpiresAtExceedsUint64() public {
+        // Configure an extremely large lock duration that would overflow uint64 expiresAt.
+        tieredMorpho.configureMarket(
+            id,
+            true,
+            WAD,
+            0,
+            0,
+            true,
+            true,
+            true,
+            type(uint64).max,
+            REQUEST_DEPOSIT,
+            0.5e18
+        );
+
+        uint256 collateralAmount = 10 ether;
+        uint256 borrowAmount = 7 ether;
+
+        _setupBorrowerPosition(collateralAmount, borrowAmount);
+        oracle.setPrice(ORACLE_PRICE_SCALE * 85 / 100);
+
+        vm.deal(liquidator, 1 ether);
+        loanToken.setBalance(liquidator, 20 ether);
+
+        vm.startPrank(liquidator);
+        loanToken.approve(address(tieredMorpho), type(uint256).max);
+        vm.expectRevert(TieredLiquidationMorpho.LockDurationTooLarge.selector);
+        tieredMorpho.requestLiquidation{value: REQUEST_DEPOSIT}(marketParams, borrower, 0.5e18);
+        vm.stopPrank();
+    }
+
+    /* ============ 6.10 FIX: EXPIRY BOUNDARY CONSISTENCY TESTS ============ */
+
+    function testAtExactExpiryRequestIsStillLockedAndExecutable() public {
+        uint256 collateralAmount = 10 ether;
+        uint256 borrowAmount = 7 ether;
+
+        _setupBorrowerPosition(collateralAmount, borrowAmount);
+        oracle.setPrice(ORACLE_PRICE_SCALE * 85 / 100);
+
+        vm.deal(liquidator, 1 ether);
+        loanToken.setBalance(liquidator, 20 ether);
+
+        vm.startPrank(liquidator);
+        loanToken.approve(address(tieredMorpho), type(uint256).max);
+        tieredMorpho.requestLiquidation{value: REQUEST_DEPOSIT}(marketParams, borrower, 0.5e18);
+        vm.stopPrank();
+
+        (,,,,, uint256 expiresAt) = tieredMorpho.getLiquidationRequest(id, borrower);
+
+        // Warp to exactly expiresAt
+        vm.warp(expiresAt);
+
+        // One-step liquidation should be blocked (still locked at == expiresAt)
+        loanToken.setBalance(publicLiquidator, 20 ether);
+        vm.startPrank(publicLiquidator);
+        loanToken.approve(address(tieredMorpho), type(uint256).max);
+        vm.expectRevert(TieredLiquidationMorpho.LiquidationRequestLocked.selector);
+        tieredMorpho.liquidate(marketParams, borrower, 1 ether, 0, "");
+        vm.stopPrank();
+
+        // Two-step execute should succeed (not expired at == expiresAt)
+        vm.prank(liquidator);
+        (uint256 seized, uint256 repaid) = tieredMorpho.executeLiquidation(marketParams, borrower, "");
+
+        assertGt(repaid, 0, "Should execute at exact expiresAt");
+        assertGt(seized, 0, "Should seize collateral at exact expiresAt");
+    }
+
+    function testAtExactExpiryThirdPartyCannotCancel() public {
+        uint256 collateralAmount = 10 ether;
+        uint256 borrowAmount = 7 ether;
+
+        _setupBorrowerPosition(collateralAmount, borrowAmount);
+        oracle.setPrice(ORACLE_PRICE_SCALE * 85 / 100);
+
+        vm.deal(liquidator, 1 ether);
+        loanToken.setBalance(liquidator, 20 ether);
+
+        vm.startPrank(liquidator);
+        loanToken.approve(address(tieredMorpho), type(uint256).max);
+        tieredMorpho.requestLiquidation{value: REQUEST_DEPOSIT}(marketParams, borrower, 0.5e18);
+        vm.stopPrank();
+
+        (,,,,, uint256 expiresAt) = tieredMorpho.getLiquidationRequest(id, borrower);
+        vm.warp(expiresAt);
+
+        // Third party should NOT be able to cancel at exact expiresAt
+        vm.prank(publicLiquidator);
+        vm.expectRevert(TieredLiquidationMorpho.RequestNotExpired.selector);
+        tieredMorpho.cancelLiquidationRequest(marketParams, borrower);
+    }
+
+    function testOneSecondAfterExpiryIsFullyExpired() public {
+        uint256 collateralAmount = 10 ether;
+        uint256 borrowAmount = 7 ether;
+
+        _setupBorrowerPosition(collateralAmount, borrowAmount);
+        oracle.setPrice(ORACLE_PRICE_SCALE * 85 / 100);
+
+        vm.deal(liquidator, 1 ether);
+        loanToken.setBalance(liquidator, 20 ether);
+
+        vm.startPrank(liquidator);
+        loanToken.approve(address(tieredMorpho), type(uint256).max);
+        tieredMorpho.requestLiquidation{value: REQUEST_DEPOSIT}(marketParams, borrower, 0.5e18);
+        vm.stopPrank();
+
+        (,,,,, uint256 expiresAt) = tieredMorpho.getLiquidationRequest(id, borrower);
+        vm.warp(expiresAt + 1);
+
+        // Execute should fail (expired)
+        vm.prank(liquidator);
+        vm.expectRevert(TieredLiquidationMorpho.LiquidationRequestExpired.selector);
+        tieredMorpho.executeLiquidation(marketParams, borrower, "");
+
+        // Third party can cancel (expired)
+        vm.prank(publicLiquidator);
+        tieredMorpho.cancelLiquidationRequest(marketParams, borrower);
+    }
+
+    /* ============ 6.11 FIX: CALLBACK IMPLEMENTATION TESTS ============ */
+
+    function testOneStepLiquidateWithNonEmptyData() public {
+        uint256 collateralAmount = 10 ether;
+        uint256 borrowAmount = 7 ether;
+
+        _setupBorrowerPosition(collateralAmount, borrowAmount);
+        oracle.setPrice(ORACLE_PRICE_SCALE * 85 / 100);
+
+        loanToken.setBalance(publicLiquidator, 20 ether);
+        vm.startPrank(publicLiquidator);
+        loanToken.approve(address(tieredMorpho), type(uint256).max);
+
+        bytes memory callbackData = abi.encode("flash-liquidation");
+        (uint256 seized, uint256 repaid) = tieredMorpho.liquidate(
+            marketParams, borrower, 1 ether, 0, callbackData
+        );
+        vm.stopPrank();
+
+        assertGt(seized, 0, "Should seize with non-empty data");
+        assertGt(repaid, 0, "Should repay with non-empty data");
+    }
+
+    function testTwoStepExecuteWithNonEmptyData() public {
+        uint256 collateralAmount = 10 ether;
+        uint256 borrowAmount = 7 ether;
+
+        _setupBorrowerPosition(collateralAmount, borrowAmount);
+        oracle.setPrice(ORACLE_PRICE_SCALE * 85 / 100);
+
+        vm.deal(liquidator, 1 ether);
+        loanToken.setBalance(liquidator, 20 ether);
+
+        vm.startPrank(liquidator);
+        loanToken.approve(address(tieredMorpho), type(uint256).max);
+        tieredMorpho.requestLiquidation{value: REQUEST_DEPOSIT}(marketParams, borrower, 0.5e18);
+        vm.stopPrank();
+
+        bytes memory callbackData = abi.encode("flash-liquidation");
+        vm.prank(liquidator);
+        (uint256 seized, uint256 repaid) = tieredMorpho.executeLiquidation(marketParams, borrower, callbackData);
+
+        assertGt(seized, 0, "Should seize with non-empty data in two-step");
+        assertGt(repaid, 0, "Should repay with non-empty data in two-step");
+    }
+
+    function testCallbackIsForwardedToOneStepCallerContract() public {
+        uint256 collateralAmount = 10 ether;
+        uint256 borrowAmount = 7 ether;
+
+        _setupBorrowerPosition(collateralAmount, borrowAmount);
+        oracle.setPrice(ORACLE_PRICE_SCALE * 85 / 100);
+
+        LiquidationCallbackReceiver receiver =
+            new LiquidationCallbackReceiver(address(tieredMorpho), marketParams.loanToken);
+        loanToken.setBalance(address(receiver), 20 ether);
+
+        bytes memory callbackData = abi.encode("receiver-callback-one-step");
+        (uint256 seized, uint256 repaid) =
+            receiver.liquidateWithCallback(marketParams, borrower, 1 ether, callbackData);
+
+        assertGt(seized, 0, "One-step should execute");
+        assertGt(repaid, 0, "One-step should repay");
+        assertTrue(receiver.callbackCalled(), "Callback should be forwarded");
+        assertEq(receiver.callbackRepaidAssets(), repaid, "Forwarded repaid amount mismatch");
+        assertEq(keccak256(receiver.callbackData()), keccak256(callbackData), "Forwarded callback data mismatch");
+    }
+
+    function testCallbackIsForwardedToTwoStepExecutorContract() public {
+        uint256 collateralAmount = 10 ether;
+        uint256 borrowAmount = 7 ether;
+
+        _setupBorrowerPosition(collateralAmount, borrowAmount);
+        oracle.setPrice(ORACLE_PRICE_SCALE * 85 / 100);
+
+        LiquidationCallbackReceiver receiver =
+            new LiquidationCallbackReceiver(address(tieredMorpho), marketParams.loanToken);
+        whitelistRegistry.addLiquidator(id, address(receiver));
+
+        vm.deal(address(receiver), 1 ether);
+        loanToken.setBalance(address(receiver), 20 ether);
+
+        receiver.requestLiquidation{value: REQUEST_DEPOSIT}(marketParams, borrower, 0.5e18);
+
+        bytes memory callbackData = abi.encode("receiver-callback-two-step");
+        (uint256 seized, uint256 repaid) =
+            receiver.executeLiquidationWithCallback(marketParams, borrower, callbackData);
+
+        assertGt(seized, 0, "Two-step should execute");
+        assertGt(repaid, 0, "Two-step should repay");
+        assertTrue(receiver.callbackCalled(), "Callback should be forwarded for two-step execute");
+        assertEq(receiver.callbackRepaidAssets(), repaid, "Forwarded two-step repaid amount mismatch");
+        assertEq(keccak256(receiver.callbackData()), keccak256(callbackData), "Forwarded two-step callback data mismatch");
+    }
+
+    function testOnMorphoLiquidateRevertsForNonMorphoCaller() public {
+        vm.prank(publicLiquidator);
+        vm.expectRevert(TieredLiquidationMorpho.Unauthorized.selector);
+        tieredMorpho.onMorphoLiquidate(1 ether, "");
+    }
+
+    /* ============ 6.12 FIX: FAILED REFUND REDIRECT TESTS ============ */
+
+    function testClaimFailedRefundToAlternateAddress() public {
+        // Simulate a failed refund by directly setting failedRefunds via a cancel scenario
+        // We'll use a contract that rejects ETH as the liquidator
+        ETHRejecter rejecter = new ETHRejecter(address(tieredMorpho), address(whitelistRegistry));
+        whitelistRegistry.addLiquidator(id, address(rejecter));
+
+        uint256 collateralAmount = 10 ether;
+        uint256 borrowAmount = 7 ether;
+        _setupBorrowerPosition(collateralAmount, borrowAmount);
+        oracle.setPrice(ORACLE_PRICE_SCALE * 85 / 100);
+
+        vm.deal(address(rejecter), 1 ether);
+        loanToken.setBalance(address(rejecter), 20 ether);
+
+        // Rejecter requests liquidation
+        rejecter.doRequestLiquidation(marketParams, borrower, 0.5e18, REQUEST_DEPOSIT);
+
+        // Warp past expiry so third party can cancel
+        (,,,,, uint256 expiresAt) = tieredMorpho.getLiquidationRequest(id, borrower);
+        vm.warp(expiresAt + 1);
+
+        // Cancel by third party — refund to rejecter will fail, stored in failedRefunds
+        rejecter.setRejectETH(true);
+        vm.prank(publicLiquidator);
+        tieredMorpho.cancelLiquidationRequest(marketParams, borrower);
+
+        // Verify failedRefunds recorded
+        uint256 pending = tieredMorpho.failedRefunds(address(rejecter));
+        assertEq(pending, REQUEST_DEPOSIT, "Failed refund should be recorded");
+
+        // Original claimFailedRefund would fail for rejecter
+        vm.prank(address(rejecter));
+        vm.expectRevert(TieredLiquidationMorpho.RefundClaimFailed.selector);
+        tieredMorpho.claimFailedRefund();
+
+        // But claimFailedRefundTo with alternate address succeeds
+        address recipient = address(0xBEEF);
+        uint256 recipientBalBefore = recipient.balance;
+
+        vm.expectEmit(true, true, true, true, address(tieredMorpho));
+        emit RefundClaimed(address(rejecter), recipient, REQUEST_DEPOSIT);
+        vm.prank(address(rejecter));
+        tieredMorpho.claimFailedRefundTo(recipient);
+
+        assertEq(recipient.balance - recipientBalBefore, REQUEST_DEPOSIT, "Recipient should receive refund");
+        assertEq(tieredMorpho.failedRefunds(address(rejecter)), 0, "Failed refund should be cleared");
+    }
+
+    function testClaimFailedRefundToZeroAddressReverts() public {
+        vm.prank(publicLiquidator);
+        vm.expectRevert(TieredLiquidationMorpho.InvalidAddress.selector);
+        tieredMorpho.claimFailedRefundTo(address(0));
+    }
+
+    function testClaimFailedRefundToWithNoRefundReverts() public {
+        vm.prank(publicLiquidator);
+        vm.expectRevert(TieredLiquidationMorpho.NoFailedRefund.selector);
+        tieredMorpho.claimFailedRefundTo(address(0xBEEF));
+    }
+
     receive() external payable {}
+}
+
+contract ETHRejecter {
+    TieredLiquidationMorpho public immutable tieredMorpho;
+    WhitelistRegistry public immutable whitelistRegistry;
+    bool public rejectETH;
+
+    constructor(address _tieredMorpho, address _whitelistRegistry) {
+        tieredMorpho = TieredLiquidationMorpho(payable(_tieredMorpho));
+        whitelistRegistry = WhitelistRegistry(_whitelistRegistry);
+    }
+
+    function setRejectETH(bool _reject) external {
+        rejectETH = _reject;
+    }
+
+    function doRequestLiquidation(
+        MarketParams calldata marketParams,
+        address borrower,
+        uint256 liquidationRatio,
+        uint256 depositAmount
+    ) external {
+        (bool s, bytes memory r) = address(marketParams.loanToken).call(
+            abi.encodeWithSignature("approve(address,uint256)", address(tieredMorpho), type(uint256).max)
+        );
+        require(s && (r.length == 0 || abi.decode(r, (bool))), "approve");
+        tieredMorpho.requestLiquidation{value: depositAmount}(marketParams, borrower, liquidationRatio);
+    }
+
+    receive() external payable {
+        if (rejectETH) revert("no ETH");
+    }
 }

@@ -1,0 +1,10 @@
+services:
+  app:
+    build: .
+    ports:
+      - "30002:80"
+    platform: linux/amd64
+    container_name: morpho-frontend
+    image: vishwanetwork/morpho-frontend:latest
+    restart: always
+

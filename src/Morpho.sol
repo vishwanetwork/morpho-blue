@@ -69,6 +69,9 @@ contract Morpho is IMorphoStaticTyping {
     /// @inheritdoc IMorphoStaticTyping
     mapping(Id => MarketParams) public idToMarketParams;
 
+    /// @notice Per-market liquidation extension: if set, only this address can call liquidate for the market.
+    mapping(Id => address) public liquidationExtension;
+
     /* CONSTRUCTOR */
 
     /// @param newOwner The new owner of the contract.
@@ -142,6 +145,17 @@ contract Morpho is IMorphoStaticTyping {
         feeRecipient = newFeeRecipient;
 
         emit EventsLib.SetFeeRecipient(newFeeRecipient);
+    }
+
+    /// @notice Sets the liquidation extension for a market. When set, only the extension can call liquidate().
+    /// @param id The market id.
+    /// @param extension The extension contract address. Use address(0) to remove the restriction.
+    function setLiquidationExtension(Id id, address extension) external onlyOwner {
+        require(market[id].lastUpdate != 0, ErrorsLib.MARKET_NOT_CREATED);
+
+        liquidationExtension[id] = extension;
+
+        emit EventsLib.SetLiquidationExtension(id, extension);
     }
 
     /* MARKET CREATION */
@@ -354,6 +368,9 @@ contract Morpho is IMorphoStaticTyping {
         Id id = marketParams.id();
         require(market[id].lastUpdate != 0, ErrorsLib.MARKET_NOT_CREATED);
         require(UtilsLib.exactlyOneZero(seizedAssets, repaidShares), ErrorsLib.INCONSISTENT_INPUT);
+
+        address extension = liquidationExtension[id];
+        require(extension == address(0) || msg.sender == extension, ErrorsLib.LIQUIDATION_RESTRICTED);
 
         _accrueInterest(marketParams, id);
 

@@ -3,28 +3,45 @@ pragma solidity >=0.8.19 <0.9.0;
 
 import {Id, MarketParams, Position, Market} from "../interfaces/IMorpho.sol";
 import {IMorpho} from "../interfaces/IMorpho.sol";
+import {IMorphoLiquidateCallback} from "../interfaces/IMorphoCallbacks.sol";
 import {IOracle} from "../interfaces/IOracle.sol";
 import {IERC20} from "../interfaces/IERC20.sol";
 
 import {MathLib, WAD} from "../libraries/MathLib.sol";
 import {SharesMathLib} from "../libraries/SharesMathLib.sol";
-import {ORACLE_PRICE_SCALE} from "../libraries/ConstantsLib.sol";
+import {ORACLE_PRICE_SCALE, LIQUIDATION_CURSOR, MAX_LIQUIDATION_INCENTIVE_FACTOR} from "../libraries/ConstantsLib.sol";
+import {UtilsLib} from "../libraries/UtilsLib.sol";
 import {MarketParamsLib} from "../libraries/MarketParamsLib.sol";
 import {SafeTransferLib} from "../libraries/SafeTransferLib.sol";
 
 import {WhitelistRegistry} from "./WhitelistRegistry.sol";
 import {HealthFactorLib} from "./libraries/HealthFactorLib.sol";
 import {PriceOracleLib} from "./libraries/PriceOracleLib.sol";
+import {MorphoBalancesLib} from "../libraries/periphery/MorphoBalancesLib.sol";
 
 /// @title TieredLiquidationMorpho
 /// @notice Enhanced Morpho protocol with flexible liquidation mechanism
 /// @dev Implements hybrid liquidation mode: public one-step + whitelist two-step
 /// @dev Gas optimized version
-contract TieredLiquidationMorpho {
+contract TieredLiquidationMorpho is IMorphoLiquidateCallback {
     using MathLib for uint256;
     using SharesMathLib for uint256;
     using SafeTransferLib for IERC20;
     using MarketParamsLib for MarketParams;
+    using MorphoBalancesLib for IMorpho;
+
+    /* REENTRANCY GUARD */
+
+    uint256 private constant _NOT_ENTERED = 1;
+    uint256 private constant _ENTERED = 2;
+    uint256 private _reentrancyStatus = _NOT_ENTERED;
+
+    modifier nonReentrant() {
+        require(_reentrancyStatus != _ENTERED, "ReentrancyGuard: reentrant call");
+        _reentrancyStatus = _ENTERED;
+        _;
+        _reentrancyStatus = _NOT_ENTERED;
+    }
 
     /* ERRORS */
 
@@ -54,9 +71,11 @@ contract TieredLiquidationMorpho {
     error InsufficientCollateral();
     error AtLeastOneModeRequired();
     error LockDurationRequired();
-    error BonusTooHigh();
+    error LockDurationTooLarge();
     error RatioExceeds100();
     error ProtocolFeeTooHigh();
+    error MorphoLiquidationExtensionMismatch();
+    error WhitelistOneStepNotEnabled();
 
     /* EVENTS */
 
@@ -67,7 +86,7 @@ contract TieredLiquidationMorpho {
         uint256 seizedAssets,
         uint256 repaidAssets,
         uint256 healthFactor,
-        uint256 liquidationBonus
+        uint256 liquidationIncentiveFactor
     );
 
     event LiquidationRequested(
@@ -97,18 +116,18 @@ contract TieredLiquidationMorpho {
 
     event MarketConfigured(
         Id indexed marketId,
-        uint256 liquidationBonus,
         uint256 maxLiquidationRatio,
         uint256 cooldownPeriod,
         uint256 minSeizedAssets,
         bool publicLiquidationEnabled,
         bool twoStepLiquidationEnabled,
+        bool whitelistOneStepEnabled,
         uint256 lockDuration,
         uint256 protocolFee
     );
 
     event RefundFailed(address indexed recipient, uint256 amount);
-    event RefundClaimed(address indexed recipient, uint256 amount);
+    event RefundClaimed(address indexed owner, address indexed recipient, uint256 amount);
 
     /* STORAGE */
 
@@ -118,12 +137,12 @@ contract TieredLiquidationMorpho {
     /// @notice Market configuration with hybrid mode support
     /// @dev Packed for gas optimization: bools grouped together
     struct MarketConfig {
-        // Slot 1: packed bools (3 bytes) + padding
+        // Slot 1: packed bools (4 bytes) + padding
         bool enabled;
         bool publicLiquidationEnabled;
         bool twoStepLiquidationEnabled;
-        // Slot 2-7: uint256 values (each takes full slot)
-        uint256 liquidationBonus;
+        bool whitelistOneStepEnabled;
+        // Slot 2-6: uint256 values (each takes full slot)
         uint256 maxLiquidationRatio;
         uint256 cooldownPeriod;
         uint256 minSeizedAssets;
@@ -141,6 +160,8 @@ contract TieredLiquidationMorpho {
         // New slot
         uint128 liquidationRatio;        // 16 bytes - sufficient for WAD precision
         uint128 depositAmount;           // 16 bytes - sufficient for ETH amounts
+        // 6.9 fix: snapshot expiresAt at creation time so lockDuration changes don't retroact
+        uint64 expiresAt;                // 8 bytes
     }
 
     /// @notice The underlying Morpho protocol
@@ -169,6 +190,9 @@ contract TieredLiquidationMorpho {
 
     /// @notice Failed refunds that can be claimed later
     mapping(address => uint256) public failedRefunds;
+
+    /// @dev Tracks current liquidation caller during Morpho callback window.
+    address private _liquidationCallbackCaller;
 
     /* MODIFIERS */
 
@@ -212,22 +236,22 @@ contract TieredLiquidationMorpho {
     function configureMarket(
         Id marketId,
         bool enabled,
-        uint256 liquidationBonus,
         uint256 maxLiquidationRatio,
         uint256 cooldownPeriod,
         uint256 minSeizedAssets,
         bool publicLiquidationEnabled,
         bool twoStepLiquidationEnabled,
+        bool whitelistOneStepEnabled,
         uint256 lockDuration,
         uint256 requestDeposit,
         uint256 protocolFee
     ) external onlyOwner {
-        if (liquidationBonus > 0.2e18) revert BonusTooHigh();
         if (maxLiquidationRatio > WAD) revert RatioExceeds100();
         if (protocolFee > WAD) revert ProtocolFeeTooHigh();
         
         if (enabled) {
             if (!publicLiquidationEnabled && !twoStepLiquidationEnabled) revert AtLeastOneModeRequired();
+            if (MORPHO.liquidationExtension(marketId) != address(this)) revert MorphoLiquidationExtensionMismatch();
         }
         
         if (twoStepLiquidationEnabled) {
@@ -238,7 +262,7 @@ contract TieredLiquidationMorpho {
             enabled: enabled,
             publicLiquidationEnabled: publicLiquidationEnabled,
             twoStepLiquidationEnabled: twoStepLiquidationEnabled,
-            liquidationBonus: liquidationBonus,
+            whitelistOneStepEnabled: whitelistOneStepEnabled,
             maxLiquidationRatio: maxLiquidationRatio,
             cooldownPeriod: cooldownPeriod,
             minSeizedAssets: minSeizedAssets,
@@ -249,12 +273,12 @@ contract TieredLiquidationMorpho {
 
         emit MarketConfigured(
             marketId,
-            liquidationBonus,
             maxLiquidationRatio,
             cooldownPeriod,
             minSeizedAssets,
             publicLiquidationEnabled,
             twoStepLiquidationEnabled,
+            whitelistOneStepEnabled,
             lockDuration,
             protocolFee
         );
@@ -269,7 +293,7 @@ contract TieredLiquidationMorpho {
         uint256 seizedAssets,
         uint256 repaidShares,
         bytes calldata data
-    ) external returns (uint256 actualSeizedAssets, uint256 actualRepaidAssets) {
+    ) external nonReentrant returns (uint256 actualSeizedAssets, uint256 actualRepaidAssets) {
         Id marketId = marketParams.id();
         
         // Cache config in memory to avoid multiple SLOADs
@@ -280,30 +304,32 @@ contract TieredLiquidationMorpho {
         // Permission check
         bool isWhitelisted = WHITELIST_REGISTRY.canLiquidate(marketId, msg.sender);
         
-        if (!config.publicLiquidationEnabled && !isWhitelisted) {
+        if (config.publicLiquidationEnabled) {
+            // Public mode: anyone can one-step liquidate
+        } else if (isWhitelisted) {
+            // Whitelist user: must have whitelistOneStepEnabled
+            if (!config.whitelistOneStepEnabled) revert WhitelistOneStepNotEnabled();
+        } else {
             revert PublicLiquidationNotEnabled();
         }
 
-        // Check two-step request lock
+        // Check two-step request lock (expiresAt is inclusive: still locked at == expiresAt)
         {
             LiquidationRequest storage request = liquidationRequests[marketId][borrower];
             if (request.status == LiquidationStatus.Pending) {
-                uint256 expiresAt;
-                unchecked {
-                    expiresAt = uint256(request.requestTimestamp) + config.lockDuration;
-                }
-                if (block.timestamp < expiresAt) {
+                if (block.timestamp <= uint256(request.expiresAt)) {
                     revert LiquidationRequestLocked();
                 }
                 _clearExpiredRequest(marketId, borrower, request);
             }
         }
 
-        // Get position data
+        // Accrue interest so that market data reflects pending interest
+        MORPHO.accrueInterest(marketParams);
+
         Market memory marketData = MORPHO.market(marketId);
         Position memory pos = MORPHO.position(marketId, borrower);
 
-        // Calculate health factor
         uint256 collateralPrice = IOracle(marketParams.oracle).price();
         uint256 borrowed = uint256(pos.borrowShares).toAssetsUp(
             marketData.totalBorrowAssets,
@@ -335,10 +361,7 @@ contract TieredLiquidationMorpho {
         (uint256 maxSeizableCollateral, uint256 maxRepayableDebt) =
             HealthFactorLib.calculateLiquidationLimits(pos.collateral, borrowed, config.maxLiquidationRatio);
 
-        uint256 liquidationIncentiveFactor;
-        unchecked {
-            liquidationIncentiveFactor = WAD + config.liquidationBonus;
-        }
+        uint256 liquidationIncentiveFactor = _coreLiquidationIncentiveFactor(marketParams.lltv);
 
         uint256 seizedAssetsToPass;
         uint256 repaidSharesToPass;
@@ -372,15 +395,20 @@ contract TieredLiquidationMorpho {
             revert InvalidLiquidationAmount();
         }
 
-        // Pull and approve loan tokens
+        // Pull and approve loan tokens (exact amount, USDT-safe)
         address loanToken = marketParams.loanToken;
         IERC20(loanToken).safeTransferFrom(msg.sender, address(this), estimatedRepayAmount);
-        _approveToken(loanToken, address(MORPHO));
+        _approveToken(loanToken, address(MORPHO), estimatedRepayAmount);
 
-        // Execute liquidation
+        // Execute liquidation. If data is non-empty, Morpho will callback this contract.
+        if (data.length > 0) _liquidationCallbackCaller = msg.sender;
         (actualSeizedAssets, actualRepaidAssets) = MORPHO.liquidate(
             marketParams, borrower, seizedAssetsToPass, repaidSharesToPass, data
         );
+        if (data.length > 0) _liquidationCallbackCaller = address(0);
+
+        // Reset allowance to 0 after use
+        _approveToken(loanToken, address(MORPHO), 0);
 
         // Return unused loan tokens
         unchecked {
@@ -390,9 +418,9 @@ contract TieredLiquidationMorpho {
             }
         }
 
-        // Calculate and collect protocol fee
+        // Calculate and collect protocol fee based on the actual core LIF bonus portion
         if (config.protocolFee > 0) {
-            uint256 totalBonus = actualSeizedAssets.mulDivDown(config.liquidationBonus, liquidationIncentiveFactor);
+            uint256 totalBonus = actualSeizedAssets.mulDivDown(liquidationIncentiveFactor - WAD, liquidationIncentiveFactor);
             uint256 protocolFeeAmount = totalBonus.mulDivDown(config.protocolFee, WAD);
             accumulatedFees[marketId] += protocolFeeAmount;
             unchecked {
@@ -420,7 +448,7 @@ contract TieredLiquidationMorpho {
             actualSeizedAssets,
             actualRepaidAssets,
             healthFactor,
-            config.liquidationBonus
+            liquidationIncentiveFactor
         );
     }
 
@@ -431,7 +459,7 @@ contract TieredLiquidationMorpho {
         MarketParams calldata marketParams,
         address borrower,
         uint256 liquidationRatio
-    ) external payable returns (uint256 requestedSeizedAssets, uint256 requestedRepaidAssets) {
+    ) external payable nonReentrant returns (uint256 requestedSeizedAssets, uint256 requestedRepaidAssets) {
         Id marketId = marketParams.id();
         MarketConfig memory config = marketConfigs[marketId];
 
@@ -450,20 +478,18 @@ contract TieredLiquidationMorpho {
             revert InsufficientDeposit();
         }
 
-        // Check existing request
+        // Check existing request (expiresAt is inclusive: still locked at == expiresAt)
         LiquidationRequest storage existingRequest = liquidationRequests[marketId][borrower];
         if (existingRequest.status == LiquidationStatus.Pending) {
-            uint256 requestExpiresAt;
-            unchecked {
-                requestExpiresAt = uint256(existingRequest.requestTimestamp) + config.lockDuration;
-            }
-            if (block.timestamp < requestExpiresAt) {
+            if (block.timestamp <= uint256(existingRequest.expiresAt)) {
                 revert LiquidationRequestLocked();
             }
             _clearExpiredRequest(marketId, borrower, existingRequest);
         }
 
-        // Get position and validate health
+        // Accrue interest so that market data reflects pending interest
+        MORPHO.accrueInterest(marketParams);
+
         Market memory marketData = MORPHO.market(marketId);
         Position memory pos = MORPHO.position(marketId, borrower);
 
@@ -494,12 +520,9 @@ contract TieredLiquidationMorpho {
             }
         }
 
-        // Calculate expected amounts
+        // Calculate expected amounts using core LIF formula
         uint256 debtToRepay = borrowed.mulDivDown(liquidationRatio, WAD);
-        uint256 liquidationIncentiveFactor;
-        unchecked {
-            liquidationIncentiveFactor = WAD + config.liquidationBonus;
-        }
+        uint256 liquidationIncentiveFactor = _coreLiquidationIncentiveFactor(marketParams.lltv);
         uint256 collateralValue = debtToRepay.mulDivUp(liquidationIncentiveFactor, WAD);
         requestedSeizedAssets = collateralValue.mulDivUp(ORACLE_PRICE_SCALE, collateralPrice);
 
@@ -508,19 +531,21 @@ contract TieredLiquidationMorpho {
 
         requestedRepaidAssets = debtToRepay;
 
-        // Store request with packed struct
+        // Store request with expiresAt snapshot (6.9 fix)
+        uint256 expiresAt;
+        unchecked {
+            expiresAt = block.timestamp + config.lockDuration;
+        }
+        if (expiresAt > type(uint64).max) revert LockDurationTooLarge();
+
         liquidationRequests[marketId][borrower] = LiquidationRequest({
             liquidator: msg.sender,
             requestTimestamp: uint64(block.timestamp),
             status: LiquidationStatus.Pending,
             liquidationRatio: uint128(liquidationRatio),
-            depositAmount: uint128(msg.value)
+            depositAmount: uint128(msg.value),
+            expiresAt: uint64(expiresAt)
         });
-
-        uint256 expiresAt;
-        unchecked {
-            expiresAt = block.timestamp + config.lockDuration;
-        }
 
         emit LiquidationRequested(
             marketId,
@@ -538,10 +563,13 @@ contract TieredLiquidationMorpho {
         MarketParams calldata marketParams,
         address borrower,
         bytes calldata data
-    ) external returns (uint256 actualSeizedAssets, uint256 actualRepaidAssets) {
+    ) external nonReentrant returns (uint256 actualSeizedAssets, uint256 actualRepaidAssets) {
         Id marketId = marketParams.id();
         MarketConfig memory config = marketConfigs[marketId];
-        
+
+        if (!config.enabled) revert MarketNotConfigured();
+        if (!config.twoStepLiquidationEnabled) revert TwoStepLiquidationNotEnabled();
+
         LiquidationRequest storage request = liquidationRequests[marketId][borrower];
 
         if (request.status != LiquidationStatus.Pending) {
@@ -551,12 +579,8 @@ contract TieredLiquidationMorpho {
             revert NotLiquidator();
         }
 
-        // Check time window
-        uint256 expiresAt;
-        unchecked {
-            expiresAt = uint256(request.requestTimestamp) + config.lockDuration;
-        }
-        if (block.timestamp > expiresAt) {
+        // Check time window (uses snapshot expiresAt, immune to lockDuration changes)
+        if (block.timestamp > uint256(request.expiresAt)) {
             revert LiquidationRequestExpired();
         }
 
@@ -564,7 +588,9 @@ contract TieredLiquidationMorpho {
         uint256 storedLiquidationRatio = uint256(request.liquidationRatio);
         uint256 depositToRefund = uint256(request.depositAmount);
 
-        // Get current position data
+        // Accrue interest so that market data reflects pending interest
+        MORPHO.accrueInterest(marketParams);
+
         Market memory marketData = MORPHO.market(marketId);
         Position memory pos = MORPHO.position(marketId, borrower);
 
@@ -583,12 +609,9 @@ contract TieredLiquidationMorpho {
 
         if (healthFactor >= WAD) revert HealthyPosition();
 
-        // Calculate amounts
+        // Calculate amounts using core LIF formula
         uint256 debtToRepay = borrowed.mulDivDown(storedLiquidationRatio, WAD);
-        uint256 liquidationIncentiveFactor;
-        unchecked {
-            liquidationIncentiveFactor = WAD + config.liquidationBonus;
-        }
+        uint256 liquidationIncentiveFactor = _coreLiquidationIncentiveFactor(marketParams.lltv);
         uint256 collateralValue = debtToRepay.mulDivUp(liquidationIncentiveFactor, WAD);
         uint256 totalSeizedAssets = collateralValue.mulDivUp(ORACLE_PRICE_SCALE, collateralPrice);
 
@@ -601,9 +624,10 @@ contract TieredLiquidationMorpho {
         }
         address loanToken = marketParams.loanToken;
         IERC20(loanToken).safeTransferFrom(msg.sender, address(this), estimatedRepay);
-        _approveToken(loanToken, address(MORPHO));
+        _approveToken(loanToken, address(MORPHO), estimatedRepay);
 
-        // Execute through Morpho
+        // Execute through Morpho. If data is non-empty, Morpho will callback this contract.
+        if (data.length > 0) _liquidationCallbackCaller = msg.sender;
         (actualSeizedAssets, actualRepaidAssets) = MORPHO.liquidate(
             marketParams,
             borrower,
@@ -611,6 +635,10 @@ contract TieredLiquidationMorpho {
             0,
             data
         );
+        if (data.length > 0) _liquidationCallbackCaller = address(0);
+
+        // Reset allowance to 0 after use
+        _approveToken(loanToken, address(MORPHO), 0);
 
         // Return unused loan tokens
         unchecked {
@@ -619,10 +647,10 @@ contract TieredLiquidationMorpho {
             }
         }
 
-        // Calculate protocol fee
+        // Calculate protocol fee based on the actual core LIF bonus portion
         uint256 liquidatorShare = actualSeizedAssets;
         if (config.protocolFee > 0) {
-            uint256 totalBonus = actualSeizedAssets.mulDivDown(config.liquidationBonus, liquidationIncentiveFactor);
+            uint256 totalBonus = actualSeizedAssets.mulDivDown(liquidationIncentiveFactor - WAD, liquidationIncentiveFactor);
             uint256 protocolFeeAmount = totalBonus.mulDivDown(config.protocolFee, WAD);
             accumulatedFees[marketId] += protocolFeeAmount;
             unchecked {
@@ -660,7 +688,7 @@ contract TieredLiquidationMorpho {
     function cancelLiquidationRequest(
         MarketParams calldata marketParams,
         address borrower
-    ) external {
+    ) external nonReentrant {
         Id marketId = marketParams.id();
         LiquidationRequest storage request = liquidationRequests[marketId][borrower];
 
@@ -668,12 +696,7 @@ contract TieredLiquidationMorpho {
             revert NoActiveRequest();
         }
 
-        MarketConfig memory config = marketConfigs[marketId];
-        uint256 expiresAt;
-        unchecked {
-            expiresAt = uint256(request.requestTimestamp) + config.lockDuration;
-        }
-        bool isExpired = block.timestamp > expiresAt;
+        bool isExpired = block.timestamp > uint256(request.expiresAt);
 
         if (!isExpired && msg.sender != request.liquidator) {
             revert RequestNotExpired();
@@ -693,35 +716,34 @@ contract TieredLiquidationMorpho {
         emit LiquidationRequestCancelled(marketId, borrower, msg.sender, isExpired);
     }
 
-    /// @notice Claim failed refunds
-    function claimFailedRefund() external {
-        uint256 amount = failedRefunds[msg.sender];
-        if (amount == 0) revert NoFailedRefund();
-        
-        failedRefunds[msg.sender] = 0;
-        
-        (bool success, ) = payable(msg.sender).call{value: amount}("");
-        if (!success) revert RefundClaimFailed();
-        
-        emit RefundClaimed(msg.sender, amount);
+    /// @notice Claim failed refunds to msg.sender
+    function claimFailedRefund() external nonReentrant {
+        _claimFailedRefundTo(msg.sender);
+    }
+
+    /// @notice Claim failed refunds to a specified recipient address
+    /// @param recipient The address to receive the refund (must not be zero)
+    function claimFailedRefundTo(address recipient) external nonReentrant {
+        if (recipient == address(0)) revert InvalidAddress();
+        _claimFailedRefundTo(recipient);
     }
 
     /* VIEW FUNCTIONS */
     
-    /// @notice Get health factor for a borrower
+    /// @notice Get health factor for a borrower (accounts for pending interest)
     function getHealthFactor(MarketParams calldata marketParams, address borrower)
         external
         view
         returns (uint256)
     {
         Id marketId = marketParams.id();
-        Market memory marketData = MORPHO.market(marketId);
         Position memory pos = MORPHO.position(marketId, borrower);
+
+        (,, uint256 totalBorrowAssets, uint256 totalBorrowShares) =
+            MORPHO.expectedMarketBalances(marketParams);
+
         uint256 collateralPrice = IOracle(marketParams.oracle).price();
-        uint256 borrowed = uint256(pos.borrowShares).toAssetsUp(
-            marketData.totalBorrowAssets,
-            marketData.totalBorrowShares
-        );
+        uint256 borrowed = uint256(pos.borrowShares).toAssetsUp(totalBorrowAssets, totalBorrowShares);
         return HealthFactorLib.calculateHealthFactor(
             pos.collateral,
             collateralPrice,
@@ -744,11 +766,6 @@ contract TieredLiquidationMorpho {
         )
     {
         LiquidationRequest storage request = liquidationRequests[marketId][borrower];
-        MarketConfig storage config = marketConfigs[marketId];
-        
-        unchecked {
-            expiresAt = uint256(request.requestTimestamp) + config.lockDuration;
-        }
         
         return (
             request.liquidator,
@@ -756,7 +773,7 @@ contract TieredLiquidationMorpho {
             uint256(request.liquidationRatio),
             uint256(request.depositAmount),
             request.status,
-            expiresAt
+            uint256(request.expiresAt)
         );
     }
 
@@ -765,6 +782,7 @@ contract TieredLiquidationMorpho {
         MarketConfig storage config = marketConfigs[marketId];
         if (!config.enabled) return false;
         if (config.publicLiquidationEnabled) return true;
+        if (!config.whitelistOneStepEnabled) return false;
         return WHITELIST_REGISTRY.canLiquidate(marketId, liquidator);
     }
 
@@ -778,13 +796,29 @@ contract TieredLiquidationMorpho {
 
     /* INTERNAL FUNCTIONS */
 
-    /// @notice Approve token spending (max approval, only if needed)
-    function _approveToken(address token, address spender) internal {
-        // Use low-level call to handle non-standard ERC20
-        (bool success,) = token.call(
-            abi.encodeWithSignature("approve(address,uint256)", spender, type(uint256).max)
-        );
-        if (!success) revert ApproveFailed();
+    /// @notice Approve exact token amount, USDT-safe (reset to 0 first)
+    function _approveToken(address token, address spender, uint256 amount) internal {
+        (bool s0, bytes memory r0) = token.call(abi.encodeWithSignature("approve(address,uint256)", spender, uint256(0)));
+        s0 = s0 && (r0.length == 0 || abi.decode(r0, (bool)));
+        if (!s0) revert ApproveFailed();
+        if (amount > 0) {
+            (bool s1, bytes memory r1) = token.call(abi.encodeWithSignature("approve(address,uint256)", spender, amount));
+            s1 = s1 && (r1.length == 0 || abi.decode(r1, (bool)));
+            if (!s1) revert ApproveFailed();
+        }
+    }
+
+    /// @notice Internal implementation of failed refund claim
+    function _claimFailedRefundTo(address recipient) internal {
+        uint256 amount = failedRefunds[msg.sender];
+        if (amount == 0) revert NoFailedRefund();
+
+        failedRefunds[msg.sender] = 0;
+
+        (bool success, ) = payable(recipient).call{value: amount}("");
+        if (!success) revert RefundClaimFailed();
+
+        emit RefundClaimed(msg.sender, recipient, amount);
     }
 
     /// @notice Safe ETH transfer with failed refund storage
@@ -812,6 +846,27 @@ contract TieredLiquidationMorpho {
         }
 
         emit LiquidationRequestCancelled(marketId, borrower, msg.sender, true);
+    }
+
+    /// @notice Computes the liquidation incentive factor using the same formula as Morpho core
+    /// @dev LIF = min(MAX_LIQUIDATION_INCENTIVE_FACTOR, WAD / (WAD - LIQUIDATION_CURSOR * (WAD - lltv)))
+    function _coreLiquidationIncentiveFactor(uint256 lltv) internal pure returns (uint256) {
+        return UtilsLib.min(
+            MAX_LIQUIDATION_INCENTIVE_FACTOR,
+            WAD.wDivDown(WAD - LIQUIDATION_CURSOR.wMulDown(WAD - lltv))
+        );
+    }
+
+    /* CALLBACKS */
+
+    /// @inheritdoc IMorphoLiquidateCallback
+    /// @dev Forwards callback to the original liquidation caller so strategy contracts can execute flash logic.
+    function onMorphoLiquidate(uint256 repaidAssets, bytes calldata data) external override {
+        if (msg.sender != address(MORPHO)) revert Unauthorized();
+        address callbackCaller = _liquidationCallbackCaller;
+        if (callbackCaller == address(0)) revert Unauthorized();
+        if (callbackCaller.code.length == 0) return;
+        IMorphoLiquidateCallback(callbackCaller).onMorphoLiquidate(repaidAssets, data);
     }
 
     /// @notice Receive ETH for deposits

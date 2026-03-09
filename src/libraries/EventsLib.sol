@@ -147,4 +147,9 @@ library EventsLib {
     /// @param interest The amount of interest accrued.
     /// @param feeShares The amount of shares minted as fee.
     event AccrueInterest(Id indexed id, uint256 prevBorrowRate, uint256 interest, uint256 feeShares);
+
+    /// @notice Emitted when setting a liquidation extension for a market.
+    /// @param id The market id.
+    /// @param extension The extension contract address (address(0) to remove restriction).
+    event SetLiquidationExtension(Id indexed id, address indexed extension);
 }

@@ -7,3 +7,7 @@ docs/
 
 # Certora
 .certora_internal/
+
+# Local audit notes
+AUDIT-ISSUES.md
+AUDIT-ISSUES-BY-NUMBER.md
