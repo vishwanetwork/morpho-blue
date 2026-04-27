@@ -17,6 +17,7 @@ import {MorphoBalancesLib} from "../libraries/periphery/MorphoBalancesLib.sol";
 import {WhitelistRegistry} from "./WhitelistRegistry.sol";
 import {HealthFactorLib} from "./libraries/HealthFactorLib.sol";
 import {ReentrancyGuard} from "openzeppelin-contracts/contracts/security/ReentrancyGuard.sol";
+import {SafeERC20} from "openzeppelin-contracts/contracts/token/ERC20/utils/SafeERC20.sol";
 
 /// @title TieredLiquidationMorpho
 /// @notice Hybrid liquidation: public one-step + whitelist two-step on top of Morpho Blue
@@ -24,6 +25,7 @@ contract TieredLiquidationMorpho is ReentrancyGuard {
     using MathLib for uint256;
     using SharesMathLib for uint256;
     using SafeTransferLib for IERC20;
+    using SafeERC20 for IERC20;
     using MarketParamsLib for MarketParams;
     using MorphoBalancesLib for IMorpho;
 
@@ -47,7 +49,6 @@ contract TieredLiquidationMorpho is ReentrancyGuard {
     error InvalidAddress();
     error NoFeesToWithdraw();
     error NoFailedRefund();
-    error ApproveFailed();
     error RefundClaimFailed();
     error InsufficientCollateral();
     error AtLeastOneModeRequired();
@@ -436,13 +437,11 @@ contract TieredLiquidationMorpho is ReentrancyGuard {
         address loanToken = marketParams.loanToken;
         IERC20(loanToken).safeTransferFrom(msg.sender, address(this), estimatedRepay);
 
-        // Approve only when needed (fixes V-06)
-        (bool success,) = loanToken.call(
-            abi.encodeWithSignature("approve(address,uint256)", address(MORPHO), type(uint256).max)
-        );
-        if (!success) revert ApproveFailed();
+        IERC20(loanToken).forceApprove(address(MORPHO), type(uint256).max);
 
         (actualSeized, actualRepaid) = MORPHO.liquidate(marketParams, borrower, seizedAssets, repaidShares, data);
+
+        IERC20(loanToken).forceApprove(address(MORPHO), 0);
 
         if (estimatedRepay > actualRepaid) {
             IERC20(loanToken).safeTransfer(msg.sender, estimatedRepay - actualRepaid);
