@@ -100,6 +100,7 @@ contract TieredLiquidationMorpho is ReentrancyGuard {
     struct LiquidationRequest {
         address liquidator;
         uint64 requestTimestamp;
+        uint64 expiresAt;
         LiquidationStatus status;
         uint128 liquidationRatio;
         uint128 depositAmount;
@@ -211,7 +212,7 @@ contract TieredLiquidationMorpho is ReentrancyGuard {
         if (!config.oneStepLiquidationEnabled) revert OneStepLiquidationNotEnabled();
         if (!config.publicLiquidationEnabled && !isWhitelisted) revert PublicLiquidationNotEnabled();
 
-        _enforceNoActiveLock(marketId, borrower, config.lockDuration);
+        _enforceNoActiveLock(marketId, borrower);
 
         PositionData memory pd = _loadAndValidatePosition(marketParams, marketId, borrower, config);
         Position memory pos = MORPHO.position(marketId, borrower);
@@ -275,7 +276,7 @@ contract TieredLiquidationMorpho is ReentrancyGuard {
         if (liquidationRatio == 0 || liquidationRatio > config.maxLiquidationRatio) revert InvalidLiquidationRatio();
         if (msg.value < config.requestDeposit) revert InsufficientDeposit();
 
-        _enforceNoActiveLock(marketId, borrower, config.lockDuration);
+        _enforceNoActiveLock(marketId, borrower);
 
         PositionData memory pd = _loadAndValidatePosition(marketParams, marketId, borrower, config);
         Position memory pos = MORPHO.position(marketId, borrower);
@@ -287,15 +288,17 @@ contract TieredLiquidationMorpho is ReentrancyGuard {
         if (requestedSeizedAssets < config.minSeizedAssets) revert BelowMinimumSeized();
         requestedRepaidAssets = debtToRepay;
 
+        uint256 expiresAt = block.timestamp + config.lockDuration;
+
         liquidationRequests[marketId][borrower] = LiquidationRequest({
             liquidator: msg.sender,
             requestTimestamp: uint64(block.timestamp),
+            expiresAt: uint64(expiresAt),
             status: LiquidationStatus.Pending,
             liquidationRatio: uint128(liquidationRatio),
             depositAmount: uint128(msg.value)
         });
 
-        uint256 expiresAt = block.timestamp + config.lockDuration;
         emit LiquidationRequested(marketId, borrower, msg.sender, requestedSeizedAssets, requestedRepaidAssets, msg.value, expiresAt);
     }
 
@@ -314,7 +317,7 @@ contract TieredLiquidationMorpho is ReentrancyGuard {
         if (request.liquidator != msg.sender) revert NotLiquidator();
         if (!WHITELIST_REGISTRY.canLiquidate(marketId, msg.sender)) revert Unauthorized();
 
-        uint256 expiresAt = uint256(request.requestTimestamp) + config.lockDuration;
+        uint256 expiresAt = uint256(request.expiresAt);
         if (block.timestamp > expiresAt) revert LiquidationRequestExpired();
 
         uint256 storedRatio = uint256(request.liquidationRatio);
@@ -355,7 +358,7 @@ contract TieredLiquidationMorpho is ReentrancyGuard {
         LiquidationRequest storage request = liquidationRequests[marketId][borrower];
         if (request.status != LiquidationStatus.Pending) revert NoActiveRequest();
 
-        uint256 expiresAt = uint256(request.requestTimestamp) + marketConfigs[marketId].lockDuration;
+        uint256 expiresAt = uint256(request.expiresAt);
         bool isExpired = block.timestamp > expiresAt;
         if (!isExpired && msg.sender != request.liquidator) revert RequestNotExpired();
 
@@ -390,7 +393,7 @@ contract TieredLiquidationMorpho is ReentrancyGuard {
     ) {
         LiquidationRequest storage r = liquidationRequests[marketId][borrower];
         return (r.liquidator, uint256(r.requestTimestamp), uint256(r.liquidationRatio),
-                uint256(r.depositAmount), r.status, uint256(r.requestTimestamp) + marketConfigs[marketId].lockDuration);
+                uint256(r.depositAmount), r.status, uint256(r.expiresAt));
     }
 
     /* ── Internal Helpers ──────────────────────────────────── */
@@ -422,10 +425,10 @@ contract TieredLiquidationMorpho is ReentrancyGuard {
         pd.liquidationIncentiveFactor = _calculateLiquidationIncentiveFactor(marketParams.lltv);
     }
 
-    function _enforceNoActiveLock(Id marketId, address borrower, uint256 lockDuration) internal {
+    function _enforceNoActiveLock(Id marketId, address borrower) internal {
         LiquidationRequest storage request = liquidationRequests[marketId][borrower];
         if (request.status == LiquidationStatus.Pending) {
-            uint256 expiresAt = uint256(request.requestTimestamp) + lockDuration;
+            uint256 expiresAt = uint256(request.expiresAt);
             if (block.timestamp < expiresAt) revert LiquidationRequestLocked();
             address orig = request.liquidator;
             uint256 deposit = uint256(request.depositAmount);
