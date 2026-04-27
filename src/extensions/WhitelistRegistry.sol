@@ -71,7 +71,9 @@ contract WhitelistRegistry {
         if (admin == address(0)) revert InvalidAddress();
         if (marketAdmin[marketId] != address(0)) revert AlreadySet();
         marketAdmin[marketId] = admin;
+        isWhitelistEnabled[marketId] = true; // enable whitelist by default for new markets
         emit MarketAdminTransferred(marketId, address(0), admin);
+        emit WhitelistModeSet(marketId, true);
     }
 
     /* ── Market Admin Functions ─────────────────────────────── */
