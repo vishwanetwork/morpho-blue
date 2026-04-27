@@ -17,7 +17,7 @@ import {MorphoBalancesLib} from "../libraries/periphery/MorphoBalancesLib.sol";
 import {WhitelistRegistry} from "./WhitelistRegistry.sol";
 import {HealthFactorLib} from "./libraries/HealthFactorLib.sol";
 import {ReentrancyGuard} from "openzeppelin-contracts/contracts/security/ReentrancyGuard.sol";
-import {SafeERC20} from "openzeppelin-contracts/contracts/token/ERC20/utils/SafeERC20.sol";
+import {SafeERC20, IERC20 as IERC20OZ} from "openzeppelin-contracts/contracts/token/ERC20/utils/SafeERC20.sol";
 
 /// @title TieredLiquidationMorpho
 /// @notice Hybrid liquidation: public one-step + whitelist two-step on top of Morpho Blue
@@ -201,8 +201,7 @@ contract TieredLiquidationMorpho is ReentrancyGuard {
         MarketParams calldata marketParams,
         address borrower,
         uint256 seizedAssets,
-        uint256 repaidShares,
-        bytes calldata data
+        uint256 repaidShares
     ) external nonReentrant returns (uint256 actualSeizedAssets, uint256 actualRepaidAssets) {
         Id marketId = marketParams.id();
         MarketConfig memory config = marketConfigs[marketId];
@@ -248,7 +247,7 @@ contract TieredLiquidationMorpho is ReentrancyGuard {
         }
 
         (actualSeizedAssets, actualRepaidAssets) = _executeMorphoLiquidation(
-            marketParams, borrower, seizedAssetsToPass, repaidSharesToPass, estimatedRepay, data
+            marketParams, borrower, seizedAssetsToPass, repaidSharesToPass, estimatedRepay
         );
 
         actualSeizedAssets = _deductProtocolFee(marketId, actualSeizedAssets, config, pd.liquidationIncentiveFactor);
@@ -305,8 +304,7 @@ contract TieredLiquidationMorpho is ReentrancyGuard {
     /// @notice Step 2: Execute the locked liquidation
     function executeLiquidation(
         MarketParams calldata marketParams,
-        address borrower,
-        bytes calldata data
+        address borrower
     ) external nonReentrant returns (uint256 actualSeizedAssets, uint256 actualRepaidAssets) {
         Id marketId = marketParams.id();
         MarketConfig memory config = marketConfigs[marketId];
@@ -337,7 +335,7 @@ contract TieredLiquidationMorpho is ReentrancyGuard {
         if (totalSeized > pos.collateral) revert InsufficientCollateral();
 
         (actualSeizedAssets, actualRepaidAssets) = _executeMorphoLiquidation(
-            marketParams, borrower, totalSeized, 0, debtToRepay * 12 / 10, data
+            marketParams, borrower, totalSeized, 0, debtToRepay * 12 / 10
         );
 
         uint256 liquidatorShare = _deductProtocolFee(marketId, actualSeizedAssets, config, lif);
@@ -440,14 +438,14 @@ contract TieredLiquidationMorpho is ReentrancyGuard {
 
     function _executeMorphoLiquidation(
         MarketParams calldata marketParams, address borrower,
-        uint256 seizedAssets, uint256 repaidShares, uint256 estimatedRepay, bytes calldata data
+        uint256 seizedAssets, uint256 repaidShares, uint256 estimatedRepay
     ) internal returns (uint256 actualSeized, uint256 actualRepaid) {
         address loanToken = marketParams.loanToken;
         IERC20(loanToken).safeTransferFrom(msg.sender, address(this), estimatedRepay);
 
         IERC20(loanToken).forceApprove(address(MORPHO), type(uint256).max);
 
-        (actualSeized, actualRepaid) = MORPHO.liquidate(marketParams, borrower, seizedAssets, repaidShares, data);
+        (actualSeized, actualRepaid) = MORPHO.liquidate(marketParams, borrower, seizedAssets, repaidShares, new bytes(0));
 
         IERC20(loanToken).forceApprove(address(MORPHO), 0);
 
